@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import Module from 'manifold-3d'
+import { ensureFloatGeometry } from './normalizeGeometry'
 
 type ManifoldCtor = {
   new (mesh: unknown): ManifoldSolid
@@ -8,6 +9,7 @@ type ManifoldCtor = {
   difference(...args: ManifoldSolid[]): ManifoldSolid
   intersection(...args: ManifoldSolid[]): ManifoldSolid
   cube(size?: number | [number, number, number], center?: boolean): ManifoldSolid
+  hull(points: readonly (ManifoldSolid | [number, number, number])[]): ManifoldSolid
 }
 
 type MeshCtor = {
@@ -315,4 +317,76 @@ export async function ensureManifoldSolid(
   const out = await manifoldToGeom(solid)
   solid.delete()
   return out
+}
+
+/**
+ * Stitch open boundary vertices via Manifold Mesh.merge(), then build solid.
+ * Best-effort repair for meshes with naked edges / quantization gaps.
+ */
+export async function repairWithManifoldMerge(
+  geom: THREE.BufferGeometry,
+): Promise<THREE.BufferGeometry | null> {
+  const { Manifold, Mesh } = await api()
+  let g = ensureFloatGeometry(materializeDrawRange(geom))
+  for (const name of Object.keys(g.attributes)) {
+    if (name !== 'position') g.deleteAttribute(name)
+  }
+  g = prepareForManifold(g)
+  const pos = g.getAttribute('position') as THREE.BufferAttribute
+  const idx = g.index!
+
+  const vertProperties = new Float32Array(pos.count * 3)
+  for (let i = 0; i < pos.count; i++) {
+    vertProperties[i * 3] = pos.getX(i)
+    vertProperties[i * 3 + 1] = pos.getY(i)
+    vertProperties[i * 3 + 2] = pos.getZ(i)
+  }
+  const triVerts = new Uint32Array(idx.count)
+  for (let i = 0; i < idx.count; i++) triVerts[i] = idx.getX(i)
+
+  const mesh = new Mesh({ numProp: 3, vertProperties, triVerts })
+  mesh.merge()
+  try {
+    const solid = new Manifold(mesh)
+    const out = await manifoldToGeom(solid)
+    solid.delete()
+    return out
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Convex hull of a geometry's vertices. Guarantees a manifold solid even when
+ * curtain-extrusions self-intersect (common for lateral X/Y inserts).
+ */
+export async function hullFromGeometry(
+  geom: THREE.BufferGeometry,
+): Promise<THREE.BufferGeometry | null> {
+  const { Manifold } = await api()
+  const g = materializeDrawRange(geom)
+  const pos = g.getAttribute('position') as THREE.BufferAttribute
+  if (!pos || pos.count < 4) return null
+
+  const points: [number, number, number][] = []
+  const seen = new Set<string>()
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i)
+    const y = pos.getY(i)
+    const z = pos.getZ(i)
+    const k = `${x.toFixed(4)}_${y.toFixed(4)}_${z.toFixed(4)}`
+    if (seen.has(k)) continue
+    seen.add(k)
+    points.push([x, y, z])
+  }
+  if (points.length < 4) return null
+
+  try {
+    const solid = Manifold.hull(points)
+    const out = await manifoldToGeom(solid)
+    solid.delete()
+    return out
+  } catch {
+    return null
+  }
 }

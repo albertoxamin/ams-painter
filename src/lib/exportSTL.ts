@@ -195,13 +195,22 @@ export function buildZip(
 export function downloadInsertsZip(
   geoms: THREE.BufferGeometry[],
   baseName: string,
+  colorNames?: (string | undefined)[],
 ): void {
   if (geoms.length === 0) return
   const files = geoms.map((g, i) => {
+    const raw = colorNames?.[i]?.trim()
+    const slug = raw
+      ? raw
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '_')
+          .replace(/^_|_$/g, '') || 'color'
+      : ''
+    const colorPart = slug ? `_${slug}` : ''
     const name =
       geoms.length === 1
-        ? `${baseName}_insert.stl`
-        : `${baseName}_insert_${i + 1}.stl`
+        ? `${baseName}_insert${colorPart}.stl`
+        : `${baseName}_insert_${i + 1}${colorPart}.stl`
     return { name, data: geometryToSTLBuffer(g) }
   })
   downloadBlob(buildZip(files), `${baseName}_inserts.zip`)

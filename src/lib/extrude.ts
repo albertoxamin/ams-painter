@@ -7,6 +7,16 @@ export type CutAxis = '-z' | '+z' | '-x' | '+x' | '-y' | '+y'
 export interface InsertMeta {
   axis: CutAxis
   floor: number
+  /** Entry safety plane (opposite side); omit = auto from selection + pad. */
+  entry?: number
+  /** Palette color id stamped when painting. */
+  colorId: string
+}
+
+export interface PaletteColor {
+  id: string
+  name: string
+  hex: string
 }
 
 export const CUT_AXES: { id: CutAxis; label: string; title: string }[] = [
@@ -18,8 +28,23 @@ export const CUT_AXES: { id: CutAxis; label: string; title: string }[] = [
   { id: '+y', label: '+Y', title: 'Extrude toward +Y' },
 ]
 
+/** RGB axis tint (matches viewport gizmo). */
+export const AXIS_COLORS: Record<'x' | 'y' | 'z', string> = {
+  x: '#e74c3c',
+  y: '#2ecc71',
+  z: '#3498db',
+}
+
 export function axisLetter(axis: CutAxis): 'x' | 'y' | 'z' {
   return axis[1] as 'x' | 'y' | 'z'
+}
+
+export function flipAxis(axis: CutAxis): CutAxis {
+  return (axis[0] === '-' ? `+${axis[1]}` : `-${axis[1]}`) as CutAxis
+}
+
+function getCoord(x: number, y: number, z: number, letter: 'x' | 'y' | 'z'): number {
+  return letter === 'x' ? x : letter === 'y' ? y : z
 }
 
 /** Bounds of the model along the cut axis. */
@@ -35,8 +60,117 @@ export function axisBounds(
   return { min: b.min.y, max: b.max.y }
 }
 
-function getCoord(x: number, y: number, z: number, letter: 'x' | 'y' | 'z'): number {
-  return letter === 'x' ? x : letter === 'y' ? y : z
+/** Min/max/mean of selected face vertices along an axis letter. */
+export function selectionSpan(
+  geom: THREE.BufferGeometry,
+  selected: Set<number>,
+  letter: 'x' | 'y' | 'z',
+): { min: number; max: number; mean: number } {
+  const pos = geom.getAttribute('position') as THREE.BufferAttribute
+  let min = Infinity
+  let max = -Infinity
+  let sum = 0
+  let n = 0
+  for (const t of selected) {
+    const a = t * 3
+    for (let i = 0; i < 3; i++) {
+      const c = getCoord(pos.getX(a + i), pos.getY(a + i), pos.getZ(a + i), letter)
+      min = Math.min(min, c)
+      max = Math.max(max, c)
+      sum += c
+      n++
+    }
+  }
+  return { min, max, mean: n ? sum / n : 0 }
+}
+
+/**
+ * Resolve printable-insert floor vs body-cutter floors.
+ *
+ * Extrusion follows `axis` (e.g. −X decreases X). The insert stops at `userFloor`
+ * (clamped between the painted surface and the far side). The body cutter matches
+ * that depth (`cutterFloor` = insert floor + small seating pad) and also opens a
+ * short entry cut the opposite way past the painted surface (`entryFloor`).
+ *
+ * Pass `userEntry` to override the auto entry plane (from drag handles).
+ */
+export function resolveInsertFloors(
+  geom: THREE.BufferGeometry,
+  selected: Set<number>,
+  axis: CutAxis,
+  userFloor: number,
+  pad = 0.75,
+  userEntry?: number,
+): {
+  insertFloor: number
+  /** Pocket depth for the body cut (insert floor + seating pad, not through-model). */
+  cutterFloor: number
+  /** Entry safety plane past the painted surface (opposite direction). */
+  entryFloor: number
+  axis: CutAxis
+} {
+  const letter = axisLetter(axis)
+  let sign = axis[0] === '-' ? -1 : 1
+  const span = selectionSpan(geom, selected, letter)
+  geom.computeBoundingBox()
+  const b = geom.boundingBox!
+  const bMin = letter === 'x' ? b.min.x : letter === 'y' ? b.min.y : b.min.z
+  const bMax = letter === 'x' ? b.max.x : letter === 'y' ? b.max.y : b.max.z
+
+  // Prefer cutting into the model. If the chosen sign only has a shallow
+  // outward slab (e.g. +X on a +X headlight face), reverse so the pocket
+  // goes through the body.
+  const outwardFar = sign < 0 ? bMin - pad : bMax + pad
+  const inwardFar = sign < 0 ? bMax + pad : bMin - pad
+  const outwardDepth = Math.abs(span.mean - outwardFar)
+  const inwardDepth = Math.abs(span.mean - inwardFar)
+  if (outwardDepth < 2.5 || outwardDepth < inwardDepth * 0.3) {
+    sign = -sign
+  }
+  const far = sign < 0 ? bMin - pad : bMax + pad
+  const entryDefault = sign < 0 ? span.max + pad : span.min - pad
+  // Entry stays on the outside of the selection (cannot cross into pocket)
+  const entryFar = sign < 0 ? bMax + pad : bMin - pad
+  let entryFloor = userEntry ?? entryDefault
+  if (sign < 0) {
+    // entry toward +axis: must be > face max
+    const lo = span.max + 1e-3
+    const hi = entryFar
+    if (hi > lo) entryFloor = Math.min(hi, Math.max(lo, entryFloor))
+    else entryFloor = entryDefault
+  } else {
+    // entry toward −axis: must be < face min
+    const lo = entryFar
+    const hi = span.min - 1e-3
+    if (hi > lo) entryFloor = Math.min(hi, Math.max(lo, entryFloor))
+    else entryFloor = entryDefault
+  }
+
+  const aligned: CutAxis = `${sign < 0 ? '-' : '+'}${letter}` as CutAxis
+
+  // Insert floor: between the painted surface and the far side
+  let insertFloor = userFloor
+  if (sign < 0) {
+    // toward −axis: floor must be < face min
+    const lo = far + pad
+    const hi = span.min - 1e-3
+    if (hi > lo) insertFloor = Math.min(hi, Math.max(lo, userFloor))
+    else insertFloor = (span.mean + far) / 2
+  } else {
+    const lo = span.max + 1e-3
+    const hi = far - pad
+    if (hi > lo) insertFloor = Math.min(hi, Math.max(lo, userFloor))
+    else insertFloor = (span.mean + far) / 2
+  }
+
+  // Pocket is only slightly deeper than the insert so it seats fully —
+  // never punches through to the opposite side of the model.
+  const seat = 0.2
+  let cutterFloor = insertFloor + sign * seat
+  if (sign < 0) cutterFloor = Math.max(far + pad * 0.25, cutterFloor)
+  else cutterFloor = Math.min(far - pad * 0.25, cutterFloor)
+
+  return { insertFloor, cutterFloor, entryFloor, axis: aligned }
 }
 
 function projectToFloor(

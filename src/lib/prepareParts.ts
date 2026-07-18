@@ -1,9 +1,19 @@
 import * as THREE from 'three'
-import { buildInsert, type CutAxis, type InsertMeta } from './extrude'
+import {
+  buildInsert,
+  resolveInsertFloors,
+  flipAxis,
+  type CutAxis,
+  type InsertMeta,
+} from './extrude'
 import { splitAtHeight } from './split'
 import { subtractSolid, unionSolid } from './boolean'
 import { scalePerpByClearance } from './clearance'
-import { ensureManifoldSolid } from './manifoldOps'
+import {
+  ensureManifoldSolid,
+  repairWithManifoldMerge,
+  hullFromGeometry,
+} from './manifoldOps'
 import { listSelectionIslands } from './select'
 
 export interface PreparedParts {
@@ -22,8 +32,32 @@ export interface PreparedParts {
    * own solid, using that island's cut axis + floor.
    */
   dropIns: THREE.BufferGeometry[]
+  /** Cut axis used for each drop-in (parallel to dropIns). */
+  dropInAxes: CutAxis[]
   /** True when prepared without a horizontal split. */
   insertsOnly: boolean
+}
+
+async function solidify(geom: THREE.BufferGeometry): Promise<THREE.BufferGeometry> {
+  try {
+    return await ensureManifoldSolid(geom)
+  } catch {
+    const repaired = await repairWithManifoldMerge(geom)
+    if (repaired) return repaired
+    throw new Error('Insert solid is not manifold')
+  }
+}
+
+async function trySolidify(
+  geom: THREE.BufferGeometry,
+): Promise<THREE.BufferGeometry | null> {
+  try {
+    return await solidify(geom)
+  } catch {
+    // Lateral extrusions often self-intersect when projected; convex hull
+    // still yields a printable/cuttable manifold pocket volume.
+    return hullFromGeometry(geom)
+  }
 }
 
 async function buildFitInsert(
@@ -32,19 +66,74 @@ async function buildFitInsert(
   floor: number,
   clearance: number,
   axis: CutAxis = '-z',
+  entry?: number,
 ): Promise<{
   cutter: THREE.BufferGeometry
   fit: THREE.BufferGeometry
+  axis: CutAxis
 } | null> {
   if (faces.size === 0) return null
-  const raw = buildInsert(geom, faces, { axis, floor })
-  if (!raw) return null
-  const cutter = await ensureManifoldSolid(raw)
-  const fit =
-    clearance > 0
-      ? await ensureManifoldSolid(scalePerpByClearance(cutter, -clearance, axis))
-      : cutter
-  return { cutter, fit }
+
+  const resolved = resolveInsertFloors(geom, faces, axis, floor, 0.75, entry)
+  const rawFit = buildInsert(geom, faces, {
+    axis: resolved.axis,
+    floor: resolved.insertFloor,
+  })
+  if (!rawFit) return null
+
+  // Pocket cutter matches ESP depth (insert floor + tiny seat), plus the
+  // opposite-direction entry safety — not a through-model punch.
+  const rawPocket =
+    Math.abs(resolved.cutterFloor - resolved.insertFloor) > 1e-4
+      ? buildInsert(geom, faces, {
+          axis: resolved.axis,
+          floor: resolved.cutterFloor,
+        })
+      : rawFit
+  if (!rawPocket) return null
+
+  const rawEntry = buildInsert(geom, faces, {
+    axis: flipAxis(resolved.axis),
+    floor: resolved.entryFloor,
+  })
+
+  const solidPocket = await trySolidify(rawPocket)
+  const solidEntry = rawEntry ? await trySolidify(rawEntry) : null
+  let cutter = solidPocket ?? rawPocket.clone()
+  if (solidEntry) {
+    try {
+      cutter = await unionSolid(cutter, solidEntry)
+    } catch (err) {
+      console.warn('Entry safety cut union failed; using pocket cutter only', err)
+    }
+  } else if (rawEntry) {
+    console.warn(
+      `Insert entry cut (${flipAxis(resolved.axis)} @ ${resolved.entryFloor}) failed`,
+    )
+  }
+
+  const solidFit = await trySolidify(rawFit)
+  let fit = solidFit ?? rawFit.clone()
+  if (!solidPocket || !solidFit) {
+    console.warn(
+      `Insert (${resolved.axis} @ ${resolved.insertFloor}) not manifold; using hull/raw`,
+    )
+  }
+  if (clearance > 0) {
+    if (solidFit) {
+      const shrunk = await trySolidify(
+        scalePerpByClearance(fit, -clearance, resolved.axis),
+      )
+      if (shrunk) fit = shrunk
+    } else {
+      try {
+        fit = scalePerpByClearance(fit, -clearance, resolved.axis)
+      } catch {
+        /* keep unshrunk raw */
+      }
+    }
+  }
+  return { cutter, fit, axis: resolved.axis }
 }
 
 function metaForIsland(
@@ -56,7 +145,8 @@ function metaForIsland(
   const votes = new Map<string, { m: InsertMeta; n: number }>()
   for (const f of faces) {
     const m = meta.get(f) ?? fallback
-    const key = `${m.axis}|${m.floor.toFixed(3)}`
+    const entryKey = m.entry !== undefined ? m.entry.toFixed(3) : '_'
+    const key = `${m.axis}|${m.floor.toFixed(3)}|${entryKey}|${m.colorId ?? ''}`
     const cur = votes.get(key)
     if (cur) cur.n++
     else votes.set(key, { m, n: 1 })
@@ -116,6 +206,7 @@ export async function prepareParts(
   const fallback: InsertMeta = {
     axis: opts.cutAxis ?? '-z',
     floor: opts.dropInFloorZ ?? bottomZ,
+    colorId: 'blue',
   }
 
   const dropFaces =
@@ -139,29 +230,83 @@ export async function prepareParts(
     lower: THREE.BufferGeometry
     upper: THREE.BufferGeometry | null
     dropIns: THREE.BufferGeometry[]
+    dropInAxes: CutAxis[]
   }> {
     let lower = bodyLower
     let upper = bodyUpper
     const dropIns: THREE.BufferGeometry[] = []
-    for (const island of islands) {
-      const { axis, floor } = metaForIsland(island, opts.dropInMeta, fallback)
-      const built = await buildFitInsert(geom, island, floor, c, axis)
+    const dropInAxes: CutAxis[] = []
+
+    const triCount = (g: THREE.BufferGeometry) =>
+      g.index ? g.index.count / 3 : g.getAttribute('position').count / 3
+
+    for (let i = 0; i < islands.length; i++) {
+      const island = islands[i]!
+      const { axis, floor, entry } = metaForIsland(
+        island,
+        opts.dropInMeta,
+        fallback,
+      )
+      let built: Awaited<ReturnType<typeof buildFitInsert>> = null
+      try {
+        built = await buildFitInsert(geom, island, floor, c, axis, entry)
+      } catch (err) {
+        console.warn(
+          `Insert island ${i} (${axis} @ ${floor}) solidify failed`,
+          err,
+        )
+        continue
+      }
       if (!built) continue
-      lower = await subtractSolid(lower, built.cutter)
-      if (upper) upper = await subtractSolid(upper, built.cutter)
-      dropIns.push(built.fit)
+
+      // Always keep the insert even if the pocket cut fails — otherwise
+      // lateral (−X/+X) inserts can vanish from ZIP export while the UI
+      // still shows the selection.
+      try {
+        const nextLower = await subtractSolid(lower, built.cutter)
+        // Guard: a bad cutter can wipe the body — keep insert, skip cut
+        if (triCount(nextLower) < 8) {
+          console.warn(
+            `Insert island ${i} (${axis} @ ${floor}) emptied the body; skipping cut`,
+          )
+          dropIns.push(built.fit)
+          dropInAxes.push(built.axis)
+          continue
+        }
+        let nextUpper = upper
+        if (upper) {
+          try {
+            nextUpper = await subtractSolid(upper, built.cutter)
+          } catch (err) {
+            console.warn(`Insert island ${i}: upper cut failed`, err)
+            nextUpper = upper
+          }
+        }
+        lower = nextLower
+        upper = nextUpper
+        dropIns.push(built.fit)
+        dropInAxes.push(built.axis)
+      } catch (err) {
+        console.warn(
+          `Insert island ${i} (${axis} @ ${floor}) cut failed; keeping insert`,
+          err,
+        )
+        dropIns.push(built.fit)
+        dropInAxes.push(built.axis)
+      }
     }
-    return { lower, upper, dropIns }
+    return { lower, upper, dropIns, dropInAxes }
   }
 
   if (insertsOnly) {
     const body = await ensureManifoldSolid(geom)
-    const { lower, dropIns } = await cutDropIns(body, null)
+    const { lower, dropIns, dropInAxes } = await cutDropIns(body, null)
     return {
       bottom: lower,
       upper: null,
       structuralInsert: null,
       dropIns,
+      dropInAxes,
       insertsOnly: true,
     }
   }
@@ -187,6 +332,7 @@ export async function prepareParts(
     upper: cut.upper,
     structuralInsert,
     dropIns: cut.dropIns,
+    dropInAxes: cut.dropInAxes,
     insertsOnly: false,
   }
 }

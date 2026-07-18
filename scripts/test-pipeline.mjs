@@ -1,9 +1,10 @@
 // End-to-end logic test for the geometry pipeline (no browser).
 import { readFileSync } from 'fs'
 import * as THREE from 'three'
+import { MeshBVH } from 'three-mesh-bvh'
 import { loadSTL } from '../src/lib/loadSTL.ts'
-import { countSelectionIslands } from '../src/lib/select.ts'
-import { buildInsert } from '../src/lib/extrude.ts'
+import { buildAdjacency, floodSelect } from '../src/lib/select.ts'
+import { buildInsert, selectionBoundaryEdges } from '../src/lib/extrude.ts'
 import { splitAtHeight } from '../src/lib/split.ts'
 import { cutRecess } from '../src/lib/boolean.ts'
 
@@ -12,15 +13,9 @@ const buf = fileBuf.buffer.slice(fileBuf.byteOffset, fileBuf.byteOffset + fileBu
 const model = loadSTL(buf, 'test-box.stl')
 console.log('loaded:', model.count, 'tris, z', model.zMin, '-', model.zMax)
 
-// Adjacency (cached on model at load)
-const adj = model.adjacency
-console.log('adjacency cached, sample deg(tri0)=', adj[0].length)
-console.log('islands (empty)=', countSelectionIslands(new Set(), adj))
-console.log('islands (tri0)=', countSelectionIslands(new Set([0]), adj))
-console.log(
-  'islands (0 + last)=',
-  countSelectionIslands(new Set([0, model.count - 1]), adj),
-)
+// Adjacency
+const adj = buildAdjacency(model.geometry)
+console.log('adjacency built, sample deg(tri0)=', adj[0].length)
 
 // Find a triangle on a horizontal-upward face (normal ~ +z) to test the
 // common case: extruding a horizontal selected region down to the split plane.
