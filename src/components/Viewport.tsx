@@ -19,6 +19,21 @@ import { prepareParts } from '../lib/prepareParts'
 import { facesNearPoint } from '../lib/brush'
 import { splitContourSegments } from '../lib/splitContour'
 import { listSelectionIslands } from '../lib/select'
+import ViewportToolbar, { ViewportHint } from './ViewportToolbar'
+import {
+  loopToVectors,
+  penCutoutCentroid,
+  penLoopEspSegments,
+  resolveLoopInsertFloors,
+} from '../lib/penCutout'
+import {
+  isDepthHandleDragging,
+  pointerNearDepthHandle,
+  pointerNearEntryRing,
+  pointerNearPocketHandle,
+  setDepthHandleDragging,
+  setDepthHandleTarget,
+} from '../lib/depthHandlePick'
 
 const COLORS = {
   lower: '#9aa3b2',
@@ -56,62 +71,6 @@ function pickHit(
   return { idx, point: hit.point.clone() }
 }
 
-/** Shared pick targets so the model mesh can yield raycasts to depth handles. */
-const depthHandlePick: {
-  pocket: THREE.Vector3
-  entry: THREE.Vector3
-  radius: number
-  active: boolean
-} = {
-  pocket: new THREE.Vector3(),
-  entry: new THREE.Vector3(),
-  radius: 1,
-  active: false,
-}
-
-const _pickAb = new THREE.Vector3()
-const _pickAo = new THREE.Vector3()
-const _pickRayPt = new THREE.Vector3()
-const _pickSegPt = new THREE.Vector3()
-
-function distSqRayToSegment(
-  ray: THREE.Ray,
-  a: THREE.Vector3,
-  b: THREE.Vector3,
-): number {
-  _pickAb.subVectors(b, a)
-  const len = _pickAb.length()
-  if (len < 1e-8) return ray.distanceSqToPoint(a)
-  _pickAb.multiplyScalar(1 / len)
-  _pickAo.subVectors(ray.origin, a)
-  const d1 = ray.direction
-  const d2 = _pickAb
-  const aDot = d1.dot(d1)
-  const bDot = d1.dot(d2)
-  const cDot = d2.dot(d2)
-  const dDot = d1.dot(_pickAo)
-  const eDot = d2.dot(_pickAo)
-  const denom = aDot * cDot - bDot * bDot
-  let t = 0
-  let s = eDot
-  if (Math.abs(denom) > 1e-8) {
-    t = (bDot * eDot - cDot * dDot) / denom
-    s = (aDot * eDot - bDot * dDot) / denom
-  }
-  s = Math.max(0, Math.min(len, s))
-  _pickRayPt.copy(ray.origin).addScaledVector(d1, Math.max(0, t))
-  _pickSegPt.copy(a).addScaledVector(d2, s)
-  return _pickRayPt.distanceToSquared(_pickSegPt)
-}
-
-function rayNearDepthHandle(ray: THREE.Ray): boolean {
-  if (!depthHandlePick.active) return false
-  const r2 = depthHandlePick.radius * depthHandlePick.radius
-  return (
-    distSqRayToSegment(ray, depthHandlePick.pocket, depthHandlePick.entry) <= r2
-  )
-}
-
 function isGizmoObject(obj: THREE.Object3D | null | undefined): boolean {
   let o: THREE.Object3D | null | undefined = obj
   while (o) {
@@ -122,8 +81,8 @@ function isGizmoObject(obj: THREE.Object3D | null | undefined): boolean {
   return false
 }
 
-/** True only when the nearest ray hit is a gizmo (not a gizmo behind the mesh). */
-function closestHitIsGizmo(e: ThreeEvent<PointerEvent>): boolean {
+/** True when any ray hit along the pointer ray is a gizmo. */
+function anyHitIsGizmo(e: ThreeEvent<PointerEvent>): boolean {
   const hit = e.intersections[0]
   if (hit) return isGizmoObject(hit.object)
   return isGizmoObject(e.object)
@@ -179,6 +138,13 @@ function ModelMesh() {
   const setActiveIsland = useStore((s) => s.setActiveIsland)
   const applyAxisToIsland = useStore((s) => s.applyAxisToIsland)
   const applyDepthsToIsland = useStore((s) => s.applyDepthsToIsland)
+  const paintTool = useStore((s) => s.paintTool)
+  const penCutouts = useStore((s) => s.penCutouts)
+  const addPenCutout = useStore((s) => s.addPenCutout)
+  const activePenIndex = useStore((s) => s.activePenIndex)
+  const setActivePenIndex = useStore((s) => s.setActivePenIndex)
+  const applyAxisToPenCutout = useStore((s) => s.applyAxisToPenCutout)
+  const applyDepthsToPenCutout = useStore((s) => s.applyDepthsToPenCutout)
   const setBusy = useStore((s) => s.setBusy)
   const setError = useStore((s) => s.setError)
   const beginStroke = useStore((s) => s.beginStroke)
@@ -191,7 +157,9 @@ function ModelMesh() {
   const downPoint = useRef<THREE.Vector2 | null>(null)
   const lastPaintPoint = useRef<THREE.Vector3 | null>(null)
   const [hoverIdx, setHoverIdx] = useState<number | null>(null)
-  const { controls, gl } = useThree()
+  const [penDraft, setPenDraft] = useState<THREE.Vector3[]>([])
+  const [penCursor, setPenCursor] = useState<THREE.Vector3 | null>(null)
+  const { controls, gl, camera } = useThree()
 
   const dropInIslands = useMemo(
     () => (model ? listSelectionIslands(dropIn, model.adjacency) : []),
@@ -223,25 +191,81 @@ function ModelMesh() {
 
   const gizmoIslandIdx = isPainting
     ? -1
-    : hoveredIslandIdx >= 0
-      ? hoveredIslandIdx
-      : activeIsland >= 0 && activeIsland < dropInIslands.length
-        ? activeIsland
+    : paintTool === 'pen'
+      ? activePenIndex >= 0 && activePenIndex < penCutouts.length
+        ? -1
+        : hoveredIslandIdx >= 0
+          ? hoveredIslandIdx
+          : activeIsland >= 0 && activeIsland < dropInIslands.length
+            ? activeIsland
+            : -1
+      : hoveredIslandIdx >= 0
+        ? hoveredIslandIdx
+        : activeIsland >= 0 && activeIsland < dropInIslands.length
+          ? activeIsland
+          : -1
+
+  const gizmoPenIdx =
+    isPainting || paintTool !== 'pen'
+      ? -1
+      : activePenIndex >= 0 && activePenIndex < penCutouts.length
+        ? activePenIndex
         : -1
 
+  const closePenDraft = () => {
+    if (penDraft.length >= 3) {
+      addPenCutout(
+        penDraft.map(
+          (p) => [p.x, p.y, p.z] as [number, number, number],
+        ),
+      )
+    }
+    setPenDraft([])
+    setPenCursor(null)
+  }
+
   useEffect(() => {
-    const mesh = meshRef.current
-    if (!mesh) return
-    const proto = THREE.Mesh.prototype.raycast
-    mesh.raycast = (raycaster, intersects) => {
-      // Pocket handle sits inside the shell — yield so the disc can be picked
-      if (rayNearDepthHandle(raycaster.ray)) return
-      proto.call(mesh, raycaster, intersects)
+    if (paintTool !== 'pen') {
+      setPenDraft([])
+      setPenCursor(null)
+      return
     }
-    return () => {
-      mesh.raycast = proto
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null
+      if (
+        t &&
+        (t.tagName === 'INPUT' ||
+          t.tagName === 'TEXTAREA' ||
+          t.tagName === 'SELECT' ||
+          t.isContentEditable)
+      ) {
+        return
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        setPenDraft((d) => {
+          if (d.length >= 3) {
+            addPenCutout(
+              d.map(
+                (p) => [p.x, p.y, p.z] as [number, number, number],
+              ),
+            )
+          }
+          return []
+        })
+        setPenCursor(null)
+      } else if (e.key === 'Escape') {
+        e.preventDefault()
+        setPenDraft([])
+        setPenCursor(null)
+      } else if (e.key === 'Backspace' && penDraft.length > 0) {
+        e.preventDefault()
+        setPenDraft((d) => d.slice(0, -1))
+      }
     }
-  }, [model])
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [paintTool, penDraft.length, addPenCutout])
 
   const paintAt = (e: ThreeEvent<PointerEvent>) => {
     if (!model || !meshRef.current) return
@@ -289,11 +313,42 @@ function ModelMesh() {
 
   const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
     if (!model || busy || e.button !== 0) return
-    // Gizmo is frontmost (events.filter prefers them) — leave it alone
-    if (gizmoHit.current || closestHitIsGizmo(e)) {
+    if (
+      isDepthHandleDragging() ||
+      pointerNearDepthHandle(
+        e.nativeEvent.clientX,
+        e.nativeEvent.clientY,
+        camera,
+        gl.domElement,
+      )
+    ) {
+      return
+    }
+    if (gizmoHit.current || anyHitIsGizmo(e)) {
       e.stopPropagation()
       return
     }
+
+    if (paintTool === 'pen') {
+      e.stopPropagation()
+      if (!meshRef.current) return
+      const hit = pickHit(e, meshRef.current, model.count)
+      if (!hit) return
+      const minD = Math.max(0.15, brushRadius * 0.35)
+      if (
+        penDraft.length > 0 &&
+        penDraft[penDraft.length - 1]!.distanceToSquared(hit.point) <
+          minD * minD
+      ) {
+        if (e.detail >= 2 && penDraft.length >= 3) closePenDraft()
+        return
+      }
+      setPenDraft((d) => [...d, hit.point.clone()])
+      setActiveIsland(-1)
+      setActivePenIndex(-1)
+      return
+    }
+
     e.stopPropagation()
     setPainting(true)
     lastPaintPoint.current = null
@@ -317,14 +372,21 @@ function ModelMesh() {
   }
 
   const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
-    if (!model || !meshRef.current || busy) return
+    if (!model || !meshRef.current || busy || isDepthHandleDragging()) return
+    if (paintTool === 'pen' && !painting.current) {
+      if (gizmoHit.current || anyHitIsGizmo(e)) return
+      const hit = pickHit(e, meshRef.current, model.count)
+      setPenCursor(hit?.point ?? null)
+      if (hit) setHoverIdx(hit.idx)
+      return
+    }
     if (painting.current) {
       e.stopPropagation()
       paintAt(e)
       return
     }
     // Don't clear island hover while the pointer is on a gizmo
-    if (gizmoHit.current || closestHitIsGizmo(e)) return
+    if (gizmoHit.current || anyHitIsGizmo(e)) return
 
     const hit = pickHit(e, meshRef.current, model.count)
     setHoverIdx(hit?.idx ?? null)
@@ -372,19 +434,22 @@ function ModelMesh() {
   // preview CSG fails — otherwise a failed prepare leaves an empty viewport.
   const showSource = !preview || busy || !!error
   const diag = modelDiagonal(model.geometry)
+  const penActive = paintTool === 'pen'
+  // Invisible pick shell while preview hides the source mesh (Three.js skips raycasts on visible=false).
+  const meshGhost = !showSource
 
   return (
     <group>
       <mesh
         ref={meshRef}
         geometry={model.geometry}
-        visible={showSource}
+        visible={showSource || meshGhost}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerOut={onPointerOut}
-        castShadow
-        receiveShadow
+        castShadow={!meshGhost}
+        receiveShadow={!meshGhost}
       >
         <meshStandardMaterial
           color={'#b8c0d0'}
@@ -392,10 +457,13 @@ function ModelMesh() {
           roughness={0.75}
           flatShading
           side={THREE.FrontSide}
+          transparent={meshGhost}
+          opacity={meshGhost ? 0 : 1}
+          depthWrite={!meshGhost}
         />
       </mesh>
 
-      {showSource && (
+      {(showSource || meshGhost) && (
         <>
           <HoverOutline
             geom={model.geometry}
@@ -405,7 +473,7 @@ function ModelMesh() {
           />
           <BrushCursor
             geom={model.geometry}
-            faceIndex={hoverIdx}
+            faceIndex={paintTool === 'pen' ? null : hoverIdx}
             brushRadius={brushRadius}
           />
           <SelectionOverlay
@@ -452,75 +520,141 @@ function ModelMesh() {
           {!insertsOnly && (
             <SplitCutOutline geom={model.geometry} height={splitHeight} />
           )}
-          {gizmoIslandIdx >= 0 && dropInIslands[gizmoIslandIdx] && (
-            <>
-              <AxisGizmo
-                center={islandCentroid(
-                  model.geometry,
-                  dropInIslands[gizmoIslandIdx]!,
-                )}
-                size={diag * 0.07}
-                activeAxis={
-                  resolveIslandMeta(
-                    dropInIslands[gizmoIslandIdx]!,
-                    dropInMeta,
-                    { ...brushFallback, colorId: brushColorId },
-                  ).axis
-                }
-                onPick={(axis) => {
-                  applyAxisToIsland(dropInIslands[gizmoIslandIdx]!, axis)
-                  setActiveIsland(gizmoIslandIdx)
-                }}
-                onHover={(v) => {
-                  gizmoHit.current = v
-                }}
-                onDragStart={() => {
-                  if (painting.current) endPaint()
-                  gizmoHit.current = true
-                  if (controls && 'enabled' in controls) {
-                    ;(controls as { enabled: boolean }).enabled = false
-                  }
-                }}
-                onDragEnd={() => {
-                  gizmoHit.current = false
-                  if (controls && 'enabled' in controls) {
-                    ;(controls as { enabled: boolean }).enabled = true
-                  }
-                }}
-              />
-              <DepthHandles
-                geom={model.geometry}
-                faces={dropInIslands[gizmoIslandIdx]!}
-                meta={resolveIslandMeta(
-                  dropInIslands[gizmoIslandIdx]!,
-                  dropInMeta,
-                  { ...brushFallback, colorId: brushColorId },
-                )}
-                size={diag * 0.07}
-                onHover={(v) => {
-                  gizmoHit.current = v
-                }}
-                onDragStart={() => {
-                  if (painting.current) endPaint()
-                  gizmoHit.current = true
-                  beginStroke()
-                  setActiveIsland(gizmoIslandIdx)
-                  if (controls && 'enabled' in controls) {
-                    ;(controls as { enabled: boolean }).enabled = false
-                  }
-                }}
-                onDragEnd={() => {
-                  gizmoHit.current = false
-                  if (controls && 'enabled' in controls) {
-                    ;(controls as { enabled: boolean }).enabled = true
-                  }
-                }}
-                onChange={(patch) => {
-                  applyDepthsToIsland(dropInIslands[gizmoIslandIdx]!, patch)
-                }}
-              />
-            </>
-          )}
+        </>
+      )}
+      {gizmoIslandIdx >= 0 && dropInIslands[gizmoIslandIdx] && (
+        <>
+          <AxisGizmo
+            center={islandCentroid(
+              model.geometry,
+              dropInIslands[gizmoIslandIdx]!,
+            )}
+            size={diag * 0.07}
+            activeAxis={
+              resolveIslandMeta(
+                dropInIslands[gizmoIslandIdx]!,
+                dropInMeta,
+                { ...brushFallback, colorId: brushColorId },
+              ).axis
+            }
+            onPick={(axis) => {
+              applyAxisToIsland(dropInIslands[gizmoIslandIdx]!, axis)
+              setActiveIsland(gizmoIslandIdx)
+            }}
+          />
+          <DepthHandles
+            geom={model.geometry}
+            faces={dropInIslands[gizmoIslandIdx]!}
+            meta={resolveIslandMeta(
+              dropInIslands[gizmoIslandIdx]!,
+              dropInMeta,
+              { ...brushFallback, colorId: brushColorId },
+            )}
+            size={diag * 0.07}
+            onHover={(v) => {
+              gizmoHit.current = v
+            }}
+            onDragStart={() => {
+              if (painting.current) endPaint()
+              gizmoHit.current = true
+              beginStroke()
+              setActiveIsland(gizmoIslandIdx)
+              if (controls && 'enabled' in controls) {
+                ;(controls as { enabled: boolean }).enabled = false
+              }
+            }}
+            onDragEnd={() => {
+              gizmoHit.current = false
+              if (controls && 'enabled' in controls) {
+                ;(controls as { enabled: boolean }).enabled = true
+              }
+            }}
+            onChange={(patch) => {
+              applyDepthsToIsland(dropInIslands[gizmoIslandIdx]!, patch)
+            }}
+          />
+        </>
+      )}
+      {penCutouts.map((cutout) => {
+        const col = paletteColor(palette, cutout.meta.colorId)
+        return (
+          <PenLoopOverlay
+            key={cutout.id}
+            loop={loopToVectors(cutout.loop)}
+            color={col.hex}
+            closed
+          />
+        )
+      })}
+      {(penDraft.length > 0 || penCursor) && (
+        <PenLoopOverlay
+          loop={penDraft}
+          cursor={penCursor}
+          color={paletteColor(palette, brushColorId).hex}
+          closed={false}
+        />
+      )}
+      {penActive && penCursor && (
+        <PenCursorRing
+          geom={model.geometry}
+          point={penCursor}
+          faceIndex={hoverIdx}
+          color={paletteColor(palette, brushColorId).hex}
+          size={diag * 0.012}
+        />
+      )}
+      {esp &&
+        penCutouts.map((cutout) => {
+          const col = paletteColor(palette, cutout.meta.colorId)
+          return (
+            <PenEspOutline
+              key={`pen-esp-${cutout.id}`}
+              geom={model.geometry}
+              loop={loopToVectors(cutout.loop)}
+              meta={cutout.meta}
+              color={col.hex}
+            />
+          )
+        })}
+      {gizmoPenIdx >= 0 && penCutouts[gizmoPenIdx] && (
+        <>
+          <AxisGizmo
+            center={penCutoutCentroid(
+              loopToVectors(penCutouts[gizmoPenIdx]!.loop),
+            )}
+            size={diag * 0.07}
+            activeAxis={penCutouts[gizmoPenIdx]!.meta.axis}
+            onPick={(axis) => {
+              applyAxisToPenCutout(penCutouts[gizmoPenIdx]!.id, axis)
+              setActivePenIndex(gizmoPenIdx)
+            }}
+          />
+          <DepthHandles
+            geom={model.geometry}
+            loop={loopToVectors(penCutouts[gizmoPenIdx]!.loop)}
+            meta={penCutouts[gizmoPenIdx]!.meta}
+            size={diag * 0.07}
+            onHover={(v) => {
+              gizmoHit.current = v
+            }}
+            onDragStart={() => {
+              gizmoHit.current = true
+              beginStroke()
+              setActivePenIndex(gizmoPenIdx)
+              if (controls && 'enabled' in controls) {
+                ;(controls as { enabled: boolean }).enabled = false
+              }
+            }}
+            onDragEnd={() => {
+              gizmoHit.current = false
+              if (controls && 'enabled' in controls) {
+                ;(controls as { enabled: boolean }).enabled = true
+              }
+            }}
+            onChange={(patch) => {
+              applyDepthsToPenCutout(penCutouts[gizmoPenIdx]!.id, patch)
+            }}
+          />
         </>
       )}
       <SplitPreview
@@ -545,6 +679,7 @@ function ModelMesh() {
 function DepthHandles({
   geom,
   faces,
+  loop,
   meta,
   size,
   onHover,
@@ -553,7 +688,8 @@ function DepthHandles({
   onChange,
 }: {
   geom: THREE.BufferGeometry
-  faces: Set<number>
+  faces?: Set<number>
+  loop?: THREE.Vector3[]
   meta: InsertMeta
   size: number
   onHover: (over: boolean) => void
@@ -570,20 +706,42 @@ function DepthHandles({
   const metaRef = useRef(meta)
   metaRef.current = meta
 
-  const resolved = useMemo(
-    () =>
-      resolveInsertFloors(
-        geom,
-        faces,
-        meta.axis,
-        meta.floor,
+  const resolveFloors = (
+    g: THREE.BufferGeometry,
+    m: InsertMeta,
+    floorCoord: number,
+    entryCoord?: number,
+  ) => {
+    if (loop) {
+      return resolveLoopInsertFloors(
+        g,
+        loop,
+        m.axis,
+        floorCoord,
         0.75,
-        meta.entry,
-      ),
-    [geom, faces, meta.axis, meta.floor, meta.entry],
+        entryCoord,
+      )
+    }
+    return resolveInsertFloors(
+      g,
+      faces!,
+      m.axis,
+      floorCoord,
+      0.75,
+      entryCoord,
+    )
+  }
+
+  const resolved = useMemo(
+    () => resolveFloors(geom, meta, meta.floor, meta.entry),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- faces/loop identity drives resolution
+    [geom, faces, loop, meta.axis, meta.floor, meta.entry],
   )
 
-  const center = useMemo(() => islandCentroid(geom, faces), [geom, faces])
+  const center = useMemo(() => {
+    if (loop) return penCutoutCentroid(loop)
+    return islandCentroid(geom, faces!)
+  }, [geom, faces, loop])
   const letter = axisLetter(resolved.axis)
   const color = AXIS_COLORS[letter]
   const axisUnit = useMemo(() => {
@@ -619,16 +777,25 @@ function DepthHandles({
   pocketRef.current.copy(pocketPos)
   entryRef.current.copy(entryPos)
 
-  const hitR = size * 0.55
+  const ringRadius = size * 0.28
   useEffect(() => {
-    depthHandlePick.pocket.copy(pocketPos)
-    depthHandlePick.entry.copy(entryPos)
-    depthHandlePick.radius = hitR
-    depthHandlePick.active = true
-    return () => {
-      depthHandlePick.active = false
-    }
-  }, [pocketPos.x, pocketPos.y, pocketPos.z, entryPos.x, entryPos.y, entryPos.z, hitR])
+    setDepthHandleTarget({
+      pocket: pocketPos,
+      entry: entryPos,
+      ringRadius,
+      axis: letter,
+    })
+    return () => setDepthHandleTarget(null)
+  }, [
+    pocketPos.x,
+    pocketPos.y,
+    pocketPos.z,
+    entryPos.x,
+    entryPos.y,
+    entryPos.z,
+    ringRadius,
+    letter,
+  ])
 
   const letterRef = useRef(letter)
   letterRef.current = letter
@@ -636,13 +803,59 @@ function DepthHandles({
   centerRef.current = center
   const facesRef = useRef(faces)
   facesRef.current = faces
+  const loopRef = useRef(loop)
+  loopRef.current = loop
   const geomRef = useRef(geom)
   geomRef.current = geom
+
+  const resolveFromRefs = (
+    floorCoord: number,
+    entryCoord?: number,
+  ) => {
+    const m = metaRef.current
+    if (loopRef.current) {
+      return resolveLoopInsertFloors(
+        geomRef.current,
+        loopRef.current,
+        m.axis,
+        floorCoord,
+        0.75,
+        entryCoord,
+      )
+    }
+    return resolveInsertFloors(
+      geomRef.current,
+      facesRef.current!,
+      m.axis,
+      floorCoord,
+      0.75,
+      entryCoord,
+    )
+  }
 
   // Screen-space pick in capture phase — works for the pocket disc inside the mesh
   useEffect(() => {
     const el = gl.domElement
-    const ndcThresh = 0.09
+
+    const pickHandle = (
+      clientX: number,
+      clientY: number,
+    ): 'floor' | 'entry' | null => {
+      const hitPocket = pointerNearPocketHandle(
+        clientX,
+        clientY,
+        camera,
+        el,
+        0.1,
+      )
+      const hitEntry = pointerNearEntryRing(clientX, clientY, camera, el, 0.12)
+      if (!hitPocket && !hitEntry) return null
+      if (hitPocket && !hitEntry) return 'floor'
+      if (hitEntry && !hitPocket) return 'entry'
+      const dPocket = screenDist(clientX, clientY, pocketRef.current)
+      const dEntry = screenDist(clientX, clientY, entryRef.current)
+      return dPocket <= dEntry ? 'floor' : 'entry'
+    }
 
     const screenDist = (
       clientX: number,
@@ -685,46 +898,52 @@ function DepthHandles({
 
     const onDown = (ev: PointerEvent) => {
       if (ev.button !== 0 || dragging.current) return
-      const dPocket = screenDist(ev.clientX, ev.clientY, pocketRef.current)
-      const dEntry = screenDist(ev.clientX, ev.clientY, entryRef.current)
-      const hitPocket = dPocket <= ndcThresh
-      const hitEntry = dEntry <= ndcThresh
-      if (!hitPocket && !hitEntry) return
+      const which = pickHandle(ev.clientX, ev.clientY)
+      if (!which) return
       ev.preventDefault()
       ev.stopImmediatePropagation()
-      const which =
-        hitPocket && (!hitEntry || dPocket <= dEntry) ? 'floor' : 'entry'
       const L = letterRef.current
       axisOrigin.current.copy(centerRef.current)
       axisDir.current.set(L === 'x' ? 1 : 0, L === 'y' ? 1 : 0, L === 'z' ? 1 : 0)
       dragging.current = which
+      setDepthHandleDragging(true)
       onHover(true)
       onDragStart()
       document.body.style.cursor = 'ns-resize'
+      try {
+        el.setPointerCapture(ev.pointerId)
+      } catch {
+        /* ignore */
+      }
     }
 
     const onMove = (ev: PointerEvent) => {
       if (!dragging.current) return
+      ev.preventDefault()
       const m = metaRef.current
       const coord = coordFromEvent(ev.clientX, ev.clientY)
-      const next = resolveInsertFloors(
-        geomRef.current,
-        facesRef.current,
-        m.axis,
+      const next = resolveFromRefs(
         dragging.current === 'floor' ? coord : m.floor,
-        0.75,
         dragging.current === 'entry' ? coord : m.entry,
       )
       if (dragging.current === 'floor') onChange({ floor: next.insertFloor })
       else onChange({ entry: next.entryFloor })
     }
 
-    const onUp = () => {
+    const onUp = (ev: PointerEvent) => {
       if (!dragging.current) return
       dragging.current = null
+      setDepthHandleDragging(false)
       onHover(false)
       onDragEnd()
       document.body.style.cursor = ''
+      try {
+        if (el.hasPointerCapture(ev.pointerId)) {
+          el.releasePointerCapture(ev.pointerId)
+        }
+      } catch {
+        /* ignore */
+      }
     }
 
     el.addEventListener('pointerdown', onDown, true)
@@ -739,7 +958,7 @@ function DepthHandles({
     }
   }, [camera, gl, onChange, onDragEnd, onDragStart, onHover])
 
-  const r = size * 0.28
+  const r = ringRadius
   const tubeR = size * 0.04
   const mid = pocketPos.clone().add(entryPos).multiplyScalar(0.5)
   const spanLen = Math.max(pocketPos.distanceTo(entryPos), size * 0.5)
@@ -790,18 +1009,18 @@ function AxisGizmo({
   size,
   activeAxis,
   onPick,
-  onHover,
-  onDragStart,
-  onDragEnd,
 }: {
   center: THREE.Vector3
   size: number
   activeAxis: CutAxis
   onPick: (axis: CutAxis) => void
-  onHover: (over: boolean) => void
-  onDragStart: () => void
-  onDragEnd: () => void
 }) {
+  const { camera, gl } = useThree()
+  const centerRef = useRef(center)
+  centerRef.current = center
+  const onPickRef = useRef(onPick)
+  onPickRef.current = onPick
+
   const axes: { id: CutAxis; dir: THREE.Vector3; letter: 'x' | 'y' | 'z' }[] = [
     { id: '+x', dir: new THREE.Vector3(1, 0, 0), letter: 'x' },
     { id: '-x', dir: new THREE.Vector3(-1, 0, 0), letter: 'x' },
@@ -816,9 +1035,72 @@ function AxisGizmo({
   const shaftR = size * 0.04
   const coneR = size * 0.1
 
+  // Screen-space picking — arrows sit inside the mesh so mesh raycasts win otherwise
+  useEffect(() => {
+    const el = gl.domElement
+    const ndcThresh = 0.045
+    const _tip = new THREE.Vector3()
+    const _mid = new THREE.Vector3()
+    const _proj = new THREE.Vector3()
+
+    const screenDist = (clientX: number, clientY: number, world: THREE.Vector3) => {
+      const rect = el.getBoundingClientRect()
+      const nx = ((clientX - rect.left) / rect.width) * 2 - 1
+      const ny = -((clientY - rect.top) / rect.height) * 2 + 1
+      _proj.copy(world).project(camera)
+      if (_proj.z > 1) return Infinity
+      return Math.hypot(nx - _proj.x, ny - _proj.y)
+    }
+
+    const pickAxis = (clientX: number, clientY: number): CutAxis | null => {
+      const c = centerRef.current
+      let best: { id: CutAxis; d: number } | null = null
+      for (const { id, dir } of axes) {
+        _tip.copy(c).addScaledVector(dir, shaftLen + coneLen)
+        _mid.copy(c).addScaledVector(dir, shaftLen * 0.45)
+        const d = Math.min(
+          screenDist(clientX, clientY, _tip),
+          screenDist(clientX, clientY, _mid),
+          screenDist(clientX, clientY, c),
+        )
+        if (d <= ndcThresh && (!best || d < best.d)) best = { id, d }
+      }
+      return best?.id ?? null
+    }
+
+    const onDown = (ev: PointerEvent) => {
+      if (ev.button !== 0) return
+      const axis = pickAxis(ev.clientX, ev.clientY)
+      if (!axis) return
+      ev.preventDefault()
+      ev.stopImmediatePropagation()
+      onPickRef.current(axis)
+    }
+
+    const onMove = (ev: PointerEvent) => {
+      const over = pickAxis(ev.clientX, ev.clientY) !== null
+      document.body.style.cursor = over ? 'pointer' : ''
+    }
+
+    const onUp = () => {
+      document.body.style.cursor = ''
+    }
+
+    el.addEventListener('pointerdown', onDown, true)
+    el.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    return () => {
+      el.removeEventListener('pointerdown', onDown, true)
+      el.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      document.body.style.cursor = ''
+    }
+    // axes dirs are stable module-level constants per instance
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [camera, gl, size, shaftLen, coneLen])
+
   return (
-    <group position={center}>
-      {/* small hub */}
+    <group position={center} renderOrder={30}>
       <mesh raycast={() => {}}>
         <sphereGeometry args={[size * 0.06, 12, 12]} />
         <meshBasicMaterial color="#ffffff" depthTest={false} />
@@ -837,28 +1119,7 @@ function AxisGizmo({
             <mesh
               position={mid}
               quaternion={quat}
-              userData={{ axisGizmo: true }}
-              onPointerDown={(e) => {
-                e.stopPropagation()
-                onHover(true)
-                onDragStart()
-                onPick(id)
-              }}
-              onPointerUp={(e) => {
-                e.stopPropagation()
-                onHover(false)
-                onDragEnd()
-              }}
-              onPointerOver={(e) => {
-                e.stopPropagation()
-                onHover(true)
-                document.body.style.cursor = 'pointer'
-              }}
-              onPointerOut={(e) => {
-                e.stopPropagation()
-                onHover(false)
-                document.body.style.cursor = ''
-              }}
+              raycast={() => {}}
             >
               <cylinderGeometry
                 args={[shaftR * (active ? 1.4 : 1.1), shaftR * (active ? 1.4 : 1.1), shaftLen, 8]}
@@ -870,32 +1131,7 @@ function AxisGizmo({
                 depthTest={false}
               />
             </mesh>
-            <mesh
-              position={tip}
-              quaternion={quat}
-              userData={{ axisGizmo: true }}
-              onPointerDown={(e) => {
-                e.stopPropagation()
-                onHover(true)
-                onDragStart()
-                onPick(id)
-              }}
-              onPointerUp={(e) => {
-                e.stopPropagation()
-                onHover(false)
-                onDragEnd()
-              }}
-              onPointerOver={(e) => {
-                e.stopPropagation()
-                onHover(true)
-                document.body.style.cursor = 'pointer'
-              }}
-              onPointerOut={(e) => {
-                e.stopPropagation()
-                onHover(false)
-                document.body.style.cursor = ''
-              }}
-            >
+            <mesh position={tip} quaternion={quat} raycast={() => {}}>
               <coneGeometry args={[coneR * (active ? 1.25 : 1), coneLen, 10]} />
               <meshBasicMaterial
                 color={color}
@@ -1017,6 +1253,223 @@ function HoverOutline({
 }
 
 /** X-ray wire outline of an insert curtain (surface → floor), always on top. */
+function PenCursorRing({
+  geom,
+  point,
+  faceIndex,
+  color,
+  size,
+}: {
+  geom: THREE.BufferGeometry
+  point: THREE.Vector3
+  faceIndex: number | null
+  color: string
+  size: number
+}) {
+  const quat = useMemo(() => {
+    if (faceIndex == null) return new THREE.Quaternion()
+    const pos = geom.getAttribute('position') as THREE.BufferAttribute
+    const a = faceIndex * 3
+    const v0 = new THREE.Vector3(pos.getX(a), pos.getY(a), pos.getZ(a))
+    const v1 = new THREE.Vector3(
+      pos.getX(a + 1),
+      pos.getY(a + 1),
+      pos.getZ(a + 2),
+    )
+    const v2 = new THREE.Vector3(
+      pos.getX(a + 2),
+      pos.getY(a + 2),
+      pos.getZ(a + 2),
+    )
+    const n = new THREE.Vector3()
+      .subVectors(v1, v0)
+      .cross(new THREE.Vector3().subVectors(v2, v0))
+      .normalize()
+    return new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(0, 0, 1),
+      n.lengthSq() > 1e-12 ? n : new THREE.Vector3(0, 0, 1),
+    )
+  }, [geom, faceIndex])
+
+  return (
+    <mesh position={point} quaternion={quat} raycast={() => {}} renderOrder={26}>
+      <ringGeometry args={[size * 0.55, size, 32]} />
+      <meshBasicMaterial
+        color={color}
+        transparent
+        opacity={0.85}
+        side={THREE.DoubleSide}
+        depthTest={false}
+        depthWrite={false}
+      />
+    </mesh>
+  )
+}
+
+function PenEspOutline({
+  geom,
+  loop,
+  meta,
+  color,
+}: {
+  geom: THREE.BufferGeometry
+  loop: THREE.Vector3[]
+  meta: InsertMeta
+  color: string
+}) {
+  const loopKey = useMemo(
+    () => loop.map((p) => `${p.x.toFixed(4)},${p.y.toFixed(4)},${p.z.toFixed(4)}`).join('|'),
+    [loop],
+  )
+  const edgeGeom = useMemo(() => {
+    if (loop.length < 2) return null
+    const pos = penLoopEspSegments(geom, loop, meta)
+    if (!pos) return null
+    const g = new THREE.BufferGeometry()
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+    return g
+    // loopKey stabilizes deps when loop is re-instantiated each render
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [geom, loopKey, meta.axis, meta.floor, meta.entry])
+
+  useEffect(() => {
+    return () => {
+      edgeGeom?.dispose()
+    }
+  }, [edgeGeom])
+
+  if (!edgeGeom) return null
+
+  return (
+    <lineSegments geometry={edgeGeom} raycast={() => {}} renderOrder={20}>
+      <lineBasicMaterial
+        color={color}
+        depthTest={false}
+        transparent
+        opacity={0.9}
+      />
+    </lineSegments>
+  )
+}
+
+function PenLoopOverlay({
+  loop,
+  cursor,
+  color,
+  closed,
+}: {
+  loop: THREE.Vector3[]
+  cursor?: THREE.Vector3 | null
+  color: string
+  closed: boolean
+}) {
+  const geom = useMemo(() => {
+    const pts = [...loop]
+    if (!closed && cursor) pts.push(cursor)
+    if (pts.length === 0) return null
+
+    const linePos: number[] = []
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i]!
+      const b = pts[i + 1]!
+      linePos.push(a.x, a.y, a.z, b.x, b.y, b.z)
+    }
+    if (closed && pts.length >= 3) {
+      const a = pts[pts.length - 1]!
+      const b = pts[0]!
+      linePos.push(a.x, a.y, a.z, b.x, b.y, b.z)
+    }
+
+    const lineGeom =
+      linePos.length >= 6
+        ? (() => {
+            const g = new THREE.BufferGeometry()
+            g.setAttribute(
+              'position',
+              new THREE.Float32BufferAttribute(linePos, 3),
+            )
+            return g
+          })()
+        : null
+
+    const pointPos = pts.flatMap((p) => [p.x, p.y, p.z])
+    const pointsGeom = new THREE.BufferGeometry()
+    pointsGeom.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute(pointPos, 3),
+    )
+
+    let fillGeom: THREE.BufferGeometry | null = null
+    if (closed && loop.length >= 3) {
+      const c = penCutoutCentroid(loop)
+      const verts: number[] = []
+      const tris: number[] = []
+      verts.push(c.x, c.y, c.z)
+      for (const p of loop) verts.push(p.x, p.y, p.z)
+      for (let i = 0; i < loop.length; i++) {
+        tris.push(0, i + 1, ((i + 1) % loop.length) + 1)
+      }
+      fillGeom = new THREE.BufferGeometry()
+      fillGeom.setAttribute(
+        'position',
+        new THREE.Float32BufferAttribute(verts, 3),
+      )
+      fillGeom.setIndex(tris)
+    }
+
+    return { lineGeom, fillGeom, pointsGeom }
+  }, [loop, cursor, closed])
+
+  useEffect(() => {
+    return () => {
+      geom?.lineGeom?.dispose()
+      geom?.fillGeom?.dispose()
+      geom?.pointsGeom?.dispose()
+    }
+  }, [geom])
+
+  if (!geom) return null
+
+  const lineColor = lightenHex(color, 0.2)
+
+  return (
+    <group raycast={() => {}} renderOrder={25}>
+      {geom.fillGeom && (
+        <mesh geometry={geom.fillGeom}>
+          <meshBasicMaterial
+            color={color}
+            transparent
+            opacity={0.4}
+            depthTest={false}
+            depthWrite={false}
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+      )}
+      {geom.lineGeom && (
+        <lineSegments geometry={geom.lineGeom}>
+          <lineBasicMaterial
+            color={lineColor}
+            depthTest={false}
+            transparent
+            opacity={0.95}
+          />
+        </lineSegments>
+      )}
+      <points geometry={geom.pointsGeom}>
+        <pointsMaterial
+          color={COLORS.vertex}
+          size={10}
+          sizeAttenuation={false}
+          depthTest={false}
+          transparent
+          opacity={1}
+        />
+      </points>
+    </group>
+  )
+}
+
 function InsertEspOutline({
   geom,
   selection,
@@ -1245,6 +1698,7 @@ function SplitPreview({
   const explode = useStore((s) => s.explode)
   const clearance = useStore((s) => s.clearance)
   const insertsOnly = useStore((s) => s.insertsOnly)
+  const penCutouts = useStore((s) => s.penCutouts)
   const [parts, setParts] = useState<{
     lower: THREE.BufferGeometry
     upper: THREE.BufferGeometry | null
@@ -1256,6 +1710,7 @@ function SplitPreview({
   useEffect(() => {
     if (!preview) {
       setParts(null)
+      setBusy(false)
       return
     }
     let cancelled = false
@@ -1276,6 +1731,7 @@ function SplitPreview({
             cutAxis,
             dropInMeta,
             adjacency: model.adjacency,
+            penCutouts,
           },
         )
         if (cancelled) return
@@ -1312,6 +1768,7 @@ function SplitPreview({
     dropInFloorZ,
     insertsOnly,
     cutAxis,
+    penCutouts,
     setBusy,
     setError,
   ])
@@ -1375,14 +1832,23 @@ function SplitPreview({
             </mesh>
           )}
           {parts.dropIns.map((g, i) => {
-            const island = dropInIslands[i]
+            const islandCount = dropInIslands.length
             const axis = parts.dropInAxes[i] ?? '-z'
-            const hex = island
-              ? paletteColor(
+            let hex = COLORS.dropIn
+            if (i < islandCount) {
+              const island = dropInIslands[i]
+              if (island) {
+                hex = paletteColor(
                   palette,
                   resolveIslandMeta(island, dropInMeta, fallback).colorId,
                 ).hex
-              : COLORS.dropIn
+              }
+            } else {
+              const pen = penCutouts[i - islandCount]
+              if (pen) {
+                hex = paletteColor(palette, pen.meta.colorId).hex
+              }
+            }
             // Explode along the insert's cut axis so ±X / ±Y inserts are visible
             const lift = gap * (parts.insertsOnly ? 1.1 : 1.35)
             const ox =
@@ -1502,14 +1968,15 @@ export default function Viewport() {
 
       <div className="overlay">
         {model && (
-          <>
-            <div className="badge">
-              {model.name} · {model.count.toLocaleString()} tris · z{' '}
-              {model.zMin.toFixed(1)}–{model.zMax.toFixed(1)}
-            </div>
-          </>
+          <div className="badge">
+            {model.name} · {model.count.toLocaleString()} tris · z{' '}
+            {model.zMin.toFixed(1)}–{model.zMax.toFixed(1)}
+          </div>
         )}
       </div>
+
+      <ViewportToolbar />
+      <ViewportHint />
 
       {!model && (
         <div className={`dropzone ${dropActive ? 'active' : ''}`}>

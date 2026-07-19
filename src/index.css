@@ -78,7 +78,7 @@ select {
 
 .app {
   display: grid;
-  grid-template-columns: 1fr 320px;
+  grid-template-columns: 1fr 300px;
   height: 100%;
   width: 100%;
 }
@@ -332,6 +332,226 @@ select {
 .panel .actions { display: flex; flex-direction: column; gap: 6px; }
 .panel .actions button { width: 100%; }
 
+.panel-hero {
+  gap: 10px;
+}
+.panel-hero .model-meta {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+button.block {
+  width: 100%;
+}
+button.subtle {
+  background: transparent;
+  border-style: dashed;
+  font-size: 12px;
+}
+.segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+.segmented button {
+  font-size: 12px;
+  padding: 7px 8px;
+}
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.section-head h3 {
+  margin: 0;
+}
+.badge-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 999px;
+  padding: 2px 8px;
+  min-width: 24px;
+  text-align: center;
+}
+.empty-state {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  padding: 12px;
+  background: var(--panel-2);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+.feature-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.feature-row {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.feature-row.active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.feature-chip {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  flex-shrink: 0;
+}
+.feature-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.feature-body strong {
+  font-weight: 600;
+  color: var(--text);
+}
+.feature-body span {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.error-text {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+}
+.panel-advanced {
+  margin-top: auto;
+  border-bottom: none;
+}
+.advanced-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.advanced-toggle:hover {
+  color: var(--text);
+  background: transparent;
+}
+.advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 10px;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.field-row input[type='range'] {
+  flex: 1;
+}
+.hint-line {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.tool-card {
+  background: rgba(15, 17, 21, 0.92);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  backdrop-filter: blur(8px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 200px;
+}
+.tool-row {
+  display: flex;
+  gap: 4px;
+}
+.tool-row button {
+  flex: 1;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+.tool-row button.tool-ghost {
+  flex: 0;
+  padding: 6px 10px;
+  background: transparent;
+}
+.tool-slider {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.tool-slider.compact {
+  margin-bottom: 8px;
+}
+.tool-val {
+  font-variant-numeric: tabular-nums;
+  min-width: 36px;
+  text-align: right;
+  color: var(--text);
+}
+.tool-swatches {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+.tool-swatches .swatch {
+  width: 24px;
+  height: 24px;
+}
+.viewport-btn.active {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .dropzone {
   position: absolute;
   inset: 0;
@@ -375,6 +595,10 @@ select {
   flex-direction: column;
   gap: 6px;
   align-items: flex-end;
+  pointer-events: none;
+}
+.viewport-toolbar > * {
+  pointer-events: auto;
 }
 
 .gizmo-modes {

@@ -15,6 +15,14 @@ import {
   hullFromGeometry,
 } from './manifoldOps'
 import { listSelectionIslands } from './select'
+import {
+  buildInsertFromLoop,
+  loopToVectors,
+  resolveLoopInsertFloors,
+  nudgeLoopIntoBody,
+  deeperFloorAlongAxis,
+  type PenCutout,
+} from './penCutout'
 
 export interface PreparedParts {
   /**
@@ -136,6 +144,78 @@ async function buildFitInsert(
   return { cutter, fit, axis: resolved.axis }
 }
 
+async function solidifyPenCutter(
+  geom: THREE.BufferGeometry,
+): Promise<THREE.BufferGeometry> {
+  const s = await trySolidify(geom)
+  if (s) return s
+  const repaired = await repairWithManifoldMerge(geom)
+  if (repaired) return repaired
+  const hull = await hullFromGeometry(geom)
+  if (hull) return hull
+  return geom.clone()
+}
+
+async function buildFitInsertFromLoop(
+  geom: THREE.BufferGeometry,
+  loop: THREE.Vector3[],
+  floor: number,
+  clearance: number,
+  axis: CutAxis = '-z',
+  entry?: number,
+): Promise<{
+  cutter: THREE.BufferGeometry
+  fit: THREE.BufferGeometry
+  axis: CutAxis
+} | null> {
+  if (loop.length < 3) return null
+
+  const resolved = resolveLoopInsertFloors(geom, loop, axis, floor, 0.75, entry)
+  const rawFit = buildInsertFromLoop(loop, resolved.axis, resolved.insertFloor)
+  if (!rawFit) return null
+
+  const pocketLoop = nudgeLoopIntoBody(loop, resolved.axis)
+  const pocketFloor = deeperFloorAlongAxis(resolved.cutterFloor, resolved.axis)
+
+  const rawPocket = buildInsertFromLoop(pocketLoop, resolved.axis, pocketFloor)
+  if (!rawPocket) return null
+
+  const rawEntry = buildInsertFromLoop(
+    loop,
+    flipAxis(resolved.axis),
+    resolved.entryFloor,
+  )
+
+  const solidPocket = await solidifyPenCutter(rawPocket)
+  const solidEntry = rawEntry ? await solidifyPenCutter(rawEntry) : null
+  let cutter = solidPocket
+  if (solidEntry) {
+    try {
+      cutter = await unionSolid(cutter, solidEntry)
+    } catch (err) {
+      console.warn('Pen entry cut union failed; using pocket cutter only', err)
+    }
+  }
+
+  const solidFit = await trySolidify(rawFit)
+  let fit = solidFit ?? rawFit.clone()
+  if (clearance > 0) {
+    if (solidFit) {
+      const shrunk = await trySolidify(
+        scalePerpByClearance(fit, -clearance, resolved.axis),
+      )
+      if (shrunk) fit = shrunk
+    } else {
+      try {
+        fit = scalePerpByClearance(fit, -clearance, resolved.axis)
+      } catch {
+        /* keep unshrunk raw */
+      }
+    }
+  }
+  return { cutter, fit, axis: resolved.axis }
+}
+
 function metaForIsland(
   faces: Set<number>,
   meta: Map<number, InsertMeta> | undefined,
@@ -171,6 +251,8 @@ export interface PreparePartsOptions {
   dropInMeta?: Map<number, InsertMeta>
   /** Triangle adjacency for splitting drop-in into islands. */
   adjacency?: number[][]
+  /** Pen-drawn cutout loops (each becomes its own insert). */
+  penCutouts?: PenCutout[]
   /**
    * Skip the horizontal split; cut inserts from the full model only.
    * Structural faces are ignored (caller should fold them into dropIn).
@@ -295,6 +377,58 @@ export async function prepareParts(
         dropInAxes.push(built.axis)
       }
     }
+
+    const pens = opts.penCutouts ?? []
+    for (let pi = 0; pi < pens.length; pi++) {
+      const cutout = pens[pi]!
+      const { axis, floor, entry } = cutout.meta
+      const loop = loopToVectors(cutout.loop)
+      let built: Awaited<ReturnType<typeof buildFitInsertFromLoop>> = null
+      try {
+        built = await buildFitInsertFromLoop(geom, loop, floor, c, axis, entry)
+      } catch (err) {
+        console.warn(`Pen cutout ${pi} solidify failed`, err)
+        continue
+      }
+      if (!built) continue
+      try {
+        let cutter = built.cutter
+        let nextLower: THREE.BufferGeometry
+        try {
+          nextLower = await subtractSolid(lower, cutter)
+        } catch {
+          // Retry with a slightly expanded cutter — helps thin shells / coplanar caps
+          const inflated = scalePerpByClearance(cutter, 0.1, built.axis)
+          const retryCutter = await solidifyPenCutter(inflated)
+          nextLower = await subtractSolid(lower, retryCutter)
+          cutter = retryCutter
+        }
+        if (triCount(nextLower) < 8) {
+          console.warn(`Pen cutout ${pi} emptied the body; skipping cut`)
+          dropIns.push(built.fit)
+          dropInAxes.push(built.axis)
+          continue
+        }
+        let nextUpper = upper
+        if (upper) {
+          try {
+            nextUpper = await subtractSolid(upper, cutter)
+          } catch (err) {
+            console.warn(`Pen cutout ${pi}: upper cut failed`, err)
+            nextUpper = upper
+          }
+        }
+        lower = nextLower
+        upper = nextUpper
+        dropIns.push(built.fit)
+        dropInAxes.push(built.axis)
+      } catch (err) {
+        console.warn(`Pen cutout ${pi} cut failed; keeping insert`, err)
+        dropIns.push(built.fit)
+        dropInAxes.push(built.axis)
+      }
+    }
+
     return { lower, upper, dropIns, dropInAxes }
   }
 

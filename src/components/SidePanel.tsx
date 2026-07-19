@@ -1,48 +1,31 @@
-import { useEffect, useMemo, useRef, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
   useStore,
   resolveIslandMeta,
   paletteColor,
-  type SelectionMode,
-  type PaintTarget,
 } from '../state'
 import { downloadSTL, downloadInsertsZip } from '../lib/exportSTL'
+import {
+  buildSelectionSnapshot,
+  downloadSelectionSnapshot,
+  parseSelectionSnapshot,
+  validateSnapshotForModel,
+} from '../lib/selectionSnapshot'
 import { prepareParts } from '../lib/prepareParts'
 import { countSelectionIslands, listSelectionIslands } from '../lib/select'
 import { CUT_AXES, AXIS_COLORS, axisBounds, axisLetter } from '../lib/extrude'
 
-const MODES: { id: SelectionMode; label: string; title: string }[] = [
-  { id: 'add', label: 'Add', title: 'Drag to paint-add (hold Shift to remove)' },
-  { id: 'remove', label: 'Remove', title: 'Drag to paint-remove triangles' },
-]
-
-const TARGETS: { id: PaintTarget; label: string; title: string }[] = [
-  {
-    id: 'structural',
-    label: 'Bottom (fused)',
-    title: 'Paint features that stay fused into the bottom chassis',
-  },
-  {
-    id: 'dropIn',
-    label: 'Drop-in insert',
-    title: 'Paint features that export as separate inserts dropped in from above',
-  },
-]
-
 export default function SidePanel() {
   const fileRef = useRef<HTMLInputElement>(null)
+  const markingsRef = useRef<HTMLInputElement>(null)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+
   const model = useStore((s) => s.model)
   const splitHeight = useStore((s) => s.splitHeight)
   const setSplitHeight = useStore((s) => s.setSplitHeight)
   const structural = useStore((s) => s.structural)
   const dropIn = useStore((s) => s.dropIn)
   const dropInMeta = useStore((s) => s.dropInMeta)
-  const paintTarget = useStore((s) => s.paintTarget)
-  const setPaintTarget = useStore((s) => s.setPaintTarget)
-  const undoStack = useStore((s) => s.undoStack)
-  const mode = useStore((s) => s.mode)
-  const setMode = useStore((s) => s.setMode)
-  const brushRadius = useStore((s) => s.brushRadius)
   const setBrushRadius = useStore((s) => s.setBrushRadius)
   const clearance = useStore((s) => s.clearance)
   const setClearance = useStore((s) => s.setClearance)
@@ -62,7 +45,6 @@ export default function SidePanel() {
   const updatePaletteColor = useStore((s) => s.updatePaletteColor)
   const removePaletteColor = useStore((s) => s.removePaletteColor)
   const preview = useStore((s) => s.preview)
-  const setPreview = useStore((s) => s.setPreview)
   const esp = useStore((s) => s.esp)
   const setEsp = useStore((s) => s.setEsp)
   const explode = useStore((s) => s.explode)
@@ -74,16 +56,17 @@ export default function SidePanel() {
   const busy = useStore((s) => s.busy)
   const error = useStore((s) => s.error)
   const setBusy = useStore((s) => s.setBusy)
+  const setPaintTool = useStore((s) => s.setPaintTool)
+  const restoreSelectionSnapshot = useStore((s) => s.restoreSelectionSnapshot)
+  const penCutouts = useStore((s) => s.penCutouts)
+  const activePenIndex = useStore((s) => s.activePenIndex)
+  const setActivePenIndex = useStore((s) => s.setActivePenIndex)
+  const removePenCutout = useStore((s) => s.removePenCutout)
 
-  const structuralFeatures = useMemo(
-    () => (model ? countSelectionIslands(structural, model.adjacency) : 0),
-    [model, structural],
-  )
   const dropInIslands = useMemo(
     () => (model ? listSelectionIslands(dropIn, model.adjacency) : []),
     [model, dropIn],
   )
-  const dropInFeatures = dropInIslands.length
   const brushMeta = useMemo(
     () => ({ axis: cutAxis, floor: dropInFloorZ, colorId: brushColorId }),
     [cutAxis, dropInFloorZ, brushColorId],
@@ -93,6 +76,10 @@ export default function SidePanel() {
     () => (model ? axisBounds(model, cutAxis) : { min: 0, max: 1 }),
     [model, cutAxis],
   )
+
+  const insertCount = dropInIslands.length + penCutouts.length
+  const hasMarks =
+    structural.size > 0 || dropIn.size > 0 || penCutouts.length > 0
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -117,7 +104,6 @@ export default function SidePanel() {
 
       const key = e.key.toLowerCase()
 
-      // Palette colors 1–4
       if (key >= '1' && key <= '4') {
         const idx = Number(key) - 1
         const c = useStore.getState().palette[idx]
@@ -128,7 +114,6 @@ export default function SidePanel() {
         return
       }
 
-      // Cut axis: x / y / z — same letter toggles ±, otherwise keep sign
       if (key === 'x' || key === 'y' || key === 'z') {
         e.preventDefault()
         const cur = useStore.getState().cutAxis
@@ -139,7 +124,6 @@ export default function SidePanel() {
         return
       }
 
-      // Brush radius [ ] 
       if (e.key === '[' || e.key === ']') {
         e.preventDefault()
         const cur = useStore.getState().brushRadius
@@ -149,11 +133,22 @@ export default function SidePanel() {
             ? Math.min(10, cur + step)
             : Math.max(0.2, cur - step)
         setBrushRadius(Math.round(next * 10) / 10)
+        return
+      }
+
+      if (key === 'b') {
+        e.preventDefault()
+        setPaintTool('brush')
+        return
+      }
+      if (key === 'p') {
+        e.preventDefault()
+        setPaintTool('pen')
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [undo, setBrushColor, setCutAxis, setBrushRadius])
+  }, [undo, setBrushColor, setCutAxis, setBrushRadius, setPaintTool])
 
   const onFile = async (file: File) => {
     try {
@@ -163,6 +158,45 @@ export default function SidePanel() {
       setModel(m)
     } catch (e) {
       setError((e as Error).message || 'Failed to load STL')
+    }
+  }
+
+  const saveMarkings = () => {
+    if (!model) return
+    const snap = buildSelectionSnapshot({
+      model,
+      insertsOnly,
+      splitHeight,
+      cutAxis,
+      dropInFloorZ,
+      brushColorId,
+      clearance,
+      palette,
+      structural,
+      dropIn,
+      dropInMeta,
+      penCutouts,
+    })
+    downloadSelectionSnapshot(snap, model.name)
+  }
+
+  const onMarkingsFile = async (file: File) => {
+    if (!model) {
+      setError('Load the STL first, then load markings')
+      return
+    }
+    try {
+      const text = await file.text()
+      const snap = parseSelectionSnapshot(JSON.parse(text))
+      const mismatch = validateSnapshotForModel(snap, model)
+      if (mismatch) {
+        setError(mismatch)
+        return
+      }
+      restoreSelectionSnapshot(snap)
+      setError(null)
+    } catch (e) {
+      setError((e as Error).message || 'Failed to load markings JSON')
     }
   }
 
@@ -181,6 +215,7 @@ export default function SidePanel() {
         cutAxis,
         dropInMeta,
         adjacency: model.adjacency,
+        penCutouts,
       },
     )
   }
@@ -206,13 +241,16 @@ export default function SidePanel() {
         downloadSTL(parts.upper, `${base}_upper.stl`)
       } else {
         if (parts.dropIns.length === 0) {
-          setError('No inserts painted')
+          setError('No inserts marked yet')
           return
         }
-        const colorNames = dropInIslands.map((island) => {
-          const m = resolveIslandMeta(island, dropInMeta, brushMeta)
-          return paletteColor(palette, m.colorId).name
-        })
+        const colorNames = [
+          ...dropInIslands.map((island) => {
+            const m = resolveIslandMeta(island, dropInMeta, brushMeta)
+            return paletteColor(palette, m.colorId).name
+          }),
+          ...penCutouts.map((c) => paletteColor(palette, c.meta.colorId).name),
+        ]
         downloadInsertsZip(parts.dropIns, base, colorNames)
       }
     } catch (e) {
@@ -224,8 +262,7 @@ export default function SidePanel() {
 
   return (
     <aside className="panel">
-      <section>
-        <h3>Model</h3>
+      <section className="panel-hero">
         <input
           ref={fileRef}
           type="file"
@@ -237,62 +274,250 @@ export default function SidePanel() {
             e.target.value = ''
           }}
         />
-        <button className="primary" onClick={() => fileRef.current?.click()}>
-          Load STL
+        <input
+          ref={markingsRef}
+          type="file"
+          accept=".json,application/json"
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            if (f) void onMarkingsFile(f)
+            e.target.value = ''
+          }}
+        />
+        <button className="primary block" onClick={() => fileRef.current?.click()}>
+          {model ? 'Change model' : 'Load STL'}
         </button>
         {model && (
-          <div className="help">
-            <strong>{model.name}</strong>
-            <br />
-            {model.count.toLocaleString()} triangles
-            <br />
-            height (Z-up): {model.zMax.toFixed(2)} mm
+          <div className="actions compact">
+            <button
+              type="button"
+              className="block"
+              disabled={!hasMarks}
+              onClick={saveMarkings}
+            >
+              Save markings
+            </button>
+            <button
+              type="button"
+              className="block"
+              onClick={() => markingsRef.current?.click()}
+            >
+              Load markings
+            </button>
           </div>
         )}
-      </section>
-
-      <section>
-        <h3>Mode</h3>
-        <div className="modes">
+        {model && (
+          <p className="model-meta">
+            {model.name} · {model.count.toLocaleString()} tris
+          </p>
+        )}
+        <div className="segmented">
           <button
-            className={!insertsOnly ? 'active' : ''}
-            title="Split into bottom + upper, with optional fused features"
-            onClick={() => setInsertsOnly(false)}
-          >
-            Split + features
-          </button>
-          <button
+            type="button"
             className={insertsOnly ? 'active' : ''}
-            title="No split — only paint inserts cut from the full body"
             onClick={() => setInsertsOnly(true)}
           >
             Inserts only
           </button>
-        </div>
-        <div className="help">
-          {insertsOnly
-            ? 'No horizontal split. Paint inserts; export the body with holes plus separate insert STLs.'
-            : 'Split the model at a height. Fuse structural features into the bottom, or cut drop-in inserts.'}
+          <button
+            type="button"
+            className={!insertsOnly ? 'active' : ''}
+            onClick={() => setInsertsOnly(false)}
+          >
+            Split model
+          </button>
         </div>
       </section>
 
       <section>
-        <h3>{insertsOnly ? 'Insert cut' : 'Split + insert cut'}</h3>
-        {model ? (
-          <>
-            {!insertsOnly && (
-              <div className="row stack">
-                <span className="label">Split height Z</span>
-                <input
-                  type="range"
-                  min={model.zMin + 0.1}
-                  max={model.zMax - 0.1}
-                  step={0.1}
-                  value={splitHeight}
-                  onChange={(e) => setSplitHeight(parseFloat(e.target.value))}
-                />
-                <div className="row">
-                  <span className="label">z = H</span>
+        <div className="section-head">
+          <h3>Your inserts</h3>
+          <span className="badge-count">{insertCount}</span>
+        </div>
+
+        {insertCount === 0 ? (
+          <p className="empty-state">
+            Use the toolbar on the model to paint or draw insert regions. Each
+            color becomes a separate printed piece.
+          </p>
+        ) : (
+          <ul className="feature-list">
+            {dropInIslands.map((island, i) => {
+              const m = resolveIslandMeta(island, dropInMeta, brushMeta)
+              const col = paletteColor(palette, m.colorId)
+              const active = activeIsland === i
+              return (
+                <li key={`b-${i}`}>
+                  <button
+                    type="button"
+                    className={`feature-row${active ? ' active' : ''}`}
+                    onClick={() => {
+                      setActiveIsland(active ? -1 : i)
+                      setActivePenIndex(-1)
+                      if (!active) {
+                        setCutAxis(m.axis)
+                        setDropInFloorZ(m.floor)
+                        setBrushColor(m.colorId)
+                      }
+                    }}
+                  >
+                    <span className="feature-chip" style={{ background: col.hex }} />
+                    <span className="feature-body">
+                      <strong>{col.name}</strong>
+                      <span>
+                        Brush · {m.axis} · {m.floor.toFixed(1)} mm
+                      </span>
+                    </span>
+                  </button>
+                </li>
+              )
+            })}
+            {penCutouts.map((cutout, i) => {
+              const col = paletteColor(palette, cutout.meta.colorId)
+              const active = activePenIndex === i
+              return (
+                <li key={cutout.id}>
+                  <button
+                    type="button"
+                    className={`feature-row${active ? ' active' : ''}`}
+                    onClick={() => {
+                      setActivePenIndex(active ? -1 : i)
+                      setActiveIsland(-1)
+                      if (!active) {
+                        setPaintTool('pen')
+                        setCutAxis(cutout.meta.axis)
+                        setDropInFloorZ(cutout.meta.floor)
+                        setBrushColor(cutout.meta.colorId)
+                      }
+                    }}
+                  >
+                    <span className="feature-chip" style={{ background: col.hex }} />
+                    <span className="feature-body">
+                      <strong>{col.name}</strong>
+                      <span>
+                        Pen · {cutout.loop.length} pts · {cutout.meta.axis}
+                      </span>
+                    </span>
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+
+        {activeIsland >= 0 && activeIsland < dropInIslands.length && (
+          <button
+            type="button"
+            className="block subtle"
+            onClick={() =>
+              applyBrushToIslands([dropInIslands[activeIsland]!])
+            }
+          >
+            Apply current color to selection
+          </button>
+        )}
+        {activePenIndex >= 0 && activePenIndex < penCutouts.length && (
+          <button
+            type="button"
+            className="block danger subtle"
+            onClick={() => {
+              const c = penCutouts[activePenIndex]
+              if (c) removePenCutout(c.id)
+            }}
+          >
+            Delete selected pen cutout
+          </button>
+        )}
+
+        {hasMarks && (
+          <button
+            type="button"
+            className="block subtle"
+            onClick={clearSelection}
+          >
+            Clear all markings
+          </button>
+        )}
+      </section>
+
+      <section>
+        <h3>Export</h3>
+        {preview && (
+          <label className="tool-slider compact">
+            <span>Explode preview</span>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={explode}
+              onChange={(e) => setExplode(parseFloat(e.target.value))}
+            />
+            <span className="tool-val">{Math.round(explode * 100)}%</span>
+          </label>
+        )}
+        <label className="check-row">
+          <input
+            type="checkbox"
+            checked={esp}
+            onChange={(e) => setEsp(e.target.checked)}
+          />
+          Show cut depth guides
+        </label>
+        <div className="actions">
+          <button
+            className="primary"
+            onClick={() => doExport('bottom')}
+            disabled={!model || busy}
+          >
+            {insertsOnly ? 'Body with holes' : 'Bottom part'}
+          </button>
+          {!insertsOnly && (
+            <button
+              className="primary"
+              onClick={() => doExport('upper')}
+              disabled={!model || busy}
+            >
+              Upper shell
+            </button>
+          )}
+          <button
+            className="primary"
+            onClick={() => doExport('dropIns')}
+            disabled={!model || busy || insertCount === 0}
+          >
+            Insert pieces (.zip)
+          </button>
+        </div>
+        {error && <p className="error-text">{error}</p>}
+      </section>
+
+      <section className="panel-advanced">
+        <button
+          type="button"
+          className="advanced-toggle"
+          aria-expanded={advancedOpen}
+          onClick={() => setAdvancedOpen((o) => !o)}
+        >
+          <span>Advanced settings</span>
+          <span className="chevron">{advancedOpen ? '▾' : '▸'}</span>
+        </button>
+
+        {advancedOpen && (
+          <div className="advanced-body">
+            {model && !insertsOnly && (
+              <label className="field">
+                <span>Split height (Z)</span>
+                <div className="field-row">
+                  <input
+                    type="range"
+                    min={model.zMin + 0.1}
+                    max={model.zMax - 0.1}
+                    step={0.1}
+                    value={splitHeight}
+                    onChange={(e) => setSplitHeight(parseFloat(e.target.value))}
+                  />
                   <input
                     type="number"
                     min={model.zMin}
@@ -303,28 +528,23 @@ export default function SidePanel() {
                       setSplitHeight(parseFloat(e.target.value) || 0)
                     }
                   />
-                  <span className="label">mm</span>
                 </div>
-              </div>
+              </label>
             )}
-            <div className="row stack">
-              <span className="label">Brush cut axis</span>
+
+            <label className="field">
+              <span>Default cut direction</span>
               <div className="modes axes">
                 {CUT_AXES.map((a) => {
                   const tint = AXIS_COLORS[axisLetter(a.id)]
                   const active = cutAxis === a.id
-                  const letter = axisLetter(a.id)
                   return (
                     <button
                       key={a.id}
+                      type="button"
                       className={active ? 'active axis-tint' : 'axis-tint'}
-                      title={`${a.title} (${letter.toUpperCase()} to cycle ±)`}
-                      style={
-                        {
-                          '--axis-tint': tint,
-                          color: tint,
-                        } as CSSProperties
-                      }
+                      title={a.title}
+                      style={{ '--axis-tint': tint, color: tint } as CSSProperties}
                       onClick={() => setCutAxis(a.id)}
                     >
                       {a.label}
@@ -332,10 +552,11 @@ export default function SidePanel() {
                   )
                 })}
               </div>
-            </div>
-            <div className="row stack">
-              <span className="label">Brush floor ({cutAxis})</span>
-              <div className="row">
+            </label>
+
+            <label className="field">
+              <span>Default pocket depth ({cutAxis})</span>
+              <div className="field-row">
                 <input
                   type="range"
                   min={floorBounds.min}
@@ -354,12 +575,12 @@ export default function SidePanel() {
                     setDropInFloorZ(parseFloat(e.target.value) || floorBounds.min)
                   }
                 />
-                <span className="label">mm</span>
               </div>
-            </div>
-            <div className="row stack">
-              <span className="label">Print clearance</span>
-              <div className="row">
+            </label>
+
+            <label className="field">
+              <span>Print clearance</span>
+              <div className="field-row">
                 <input
                   type="range"
                   min={0}
@@ -376,307 +597,76 @@ export default function SidePanel() {
                   value={Number(clearance.toFixed(2))}
                   onChange={(e) => setClearance(parseFloat(e.target.value) || 0)}
                 />
-                <span className="label">mm</span>
+              </div>
+            </label>
+
+            <div className="field">
+              <span>Color names (for export files)</span>
+              <div className="swatch-row">
+                {palette.map((c, i) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    className={`swatch${brushColorId === c.id ? ' active' : ''}`}
+                    title={i < 4 ? `${c.name} (${i + 1})` : c.name}
+                    style={{ background: c.hex }}
+                    onClick={() => setBrushColor(c.id)}
+                  />
+                ))}
+                <button
+                  type="button"
+                  className="swatch add"
+                  onClick={() => addPaletteColor()}
+                >
+                  +
+                </button>
+              </div>
+              <input
+                type="text"
+                value={activeColor.name}
+                placeholder="Color name"
+                onChange={(e) =>
+                  updatePaletteColor(activeColor.id, { name: e.target.value })
+                }
+              />
+              <div className="field-row">
+                <input
+                  type="color"
+                  value={
+                    /^#[0-9a-fA-F]{6}$/.test(activeColor.hex)
+                      ? activeColor.hex
+                      : '#5ec8ff'
+                  }
+                  onChange={(e) =>
+                    updatePaletteColor(activeColor.id, { hex: e.target.value })
+                  }
+                />
+                <input
+                  type="text"
+                  value={activeColor.hex}
+                  onChange={(e) =>
+                    updatePaletteColor(activeColor.id, { hex: e.target.value })
+                  }
+                />
+                <button
+                  type="button"
+                  className="danger"
+                  disabled={palette.length <= 1}
+                  onClick={() => removePaletteColor(activeColor.id)}
+                >
+                  Remove
+                </button>
               </div>
             </div>
-            <div className="help">
-              Axis + floor are stamped onto faces when you paint. Each insert
-              stops at the floor; the body pocket matches that depth and opens
-              a short safety cut the opposite way so the part can seat fully.
-              Hover an insert: drag the filled disc to set pocket depth, the
-              ring for entry depth, or a gizmo arrow to set axis.
-            </div>
-          </>
-        ) : (
-          <div className="empty">Load a model to configure heights.</div>
-        )}
-      </section>
 
-      <section>
-        <h3>Colors</h3>
-        <div className="swatch-row">
-          {palette.map((c, i) => (
-            <button
-              key={c.id}
-              type="button"
-              className={`swatch${brushColorId === c.id ? ' active' : ''}`}
-              title={i < 4 ? `${c.name} (${i + 1})` : c.name}
-              style={{ background: c.hex }}
-              onClick={() => setBrushColor(c.id)}
-            />
-          ))}
-          <button
-            type="button"
-            className="swatch add"
-            title="Add color"
-            onClick={() => addPaletteColor()}
-          >
-            +
-          </button>
-        </div>
-        <div className="row stack" style={{ marginTop: 6 }}>
-          <span className="label">Brush color name</span>
-          <input
-            type="text"
-            value={activeColor.name}
-            onChange={(e) =>
-              updatePaletteColor(activeColor.id, { name: e.target.value })
-            }
-          />
-        </div>
-        <div className="row" style={{ marginTop: 4 }}>
-          <span className="label">Hex</span>
-          <input
-            type="color"
-            value={
-              /^#[0-9a-fA-F]{6}$/.test(activeColor.hex)
-                ? activeColor.hex
-                : '#5ec8ff'
-            }
-            onChange={(e) =>
-              updatePaletteColor(activeColor.id, { hex: e.target.value })
-            }
-            style={{ width: 36, height: 28, padding: 0, border: 'none' }}
-          />
-          <input
-            type="text"
-            value={activeColor.hex}
-            onChange={(e) =>
-              updatePaletteColor(activeColor.id, { hex: e.target.value })
-            }
-            style={{ width: 90 }}
-          />
-          <button
-            type="button"
-            className="danger"
-            disabled={palette.length <= 1}
-            title="Remove color"
-            onClick={() => removePaletteColor(activeColor.id)}
-          >
-            Remove
-          </button>
-        </div>
-        <div className="help">
-          Active color is stamped when you paint inserts. Assign per feature
-          with Apply below.
-        </div>
-      </section>
-
-      <section>
-        <h3>{insertsOnly ? 'Inserts' : 'Features'}</h3>
-        {!insertsOnly && (
-          <div className="modes">
-            {TARGETS.map((t) => (
-              <button
-                key={t.id}
-                className={paintTarget === t.id ? 'active' : ''}
-                title={t.title}
-                onClick={() => setPaintTarget(t.id)}
-              >
-                {t.label}
-              </button>
-            ))}
+            {!insertsOnly && structural.size > 0 && (
+              <p className="hint-line">
+                Fused bottom: {countSelectionIslands(structural, model!.adjacency)}{' '}
+                region{countSelectionIslands(structural, model!.adjacency) === 1 ? '' : 's'}
+              </p>
+            )}
           </div>
         )}
-        <div className="modes" style={{ marginTop: insertsOnly ? 0 : 6 }}>
-          {MODES.map((m) => (
-            <button
-              key={m.id}
-              className={mode === m.id ? 'active' : ''}
-              title={m.title}
-              onClick={() => setMode(m.id)}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
-        <div className="row stack">
-          <span className="label">Brush radius ([ ] · Shift for coarse)</span>
-          <div className="row">
-            <input
-              type="range"
-              min={0.2}
-              max={10}
-              step={0.1}
-              value={brushRadius}
-              onChange={(e) => setBrushRadius(parseFloat(e.target.value))}
-            />
-            <span className="value">{brushRadius.toFixed(1)} mm</span>
-          </div>
-        </div>
-        <div className="row stack">
-          {!insertsOnly && (
-            <span className="label">
-              Bottom: {structural.size}
-              {structuralFeatures > 0 &&
-                ` · ${structuralFeatures} feature${structuralFeatures === 1 ? '' : 's'}`}
-            </span>
-          )}
-          <span className="label">
-            {insertsOnly ? 'Inserts' : 'Drop-in'}: {dropIn.size}
-            {dropInFeatures > 0 &&
-              ` · ${dropInFeatures} feature${dropInFeatures === 1 ? '' : 's'}`}
-          </span>
-        </div>
-        {dropInIslands.length > 0 && (
-          <div className="island-list">
-            {dropInIslands.map((island, i) => {
-              const m = resolveIslandMeta(island, dropInMeta, brushMeta)
-              const col = paletteColor(palette, m.colorId)
-              const active = activeIsland === i
-              return (
-                <button
-                  key={i}
-                  type="button"
-                  className={`island-row${active ? ' active' : ''}`}
-                  onClick={() => {
-                    setActiveIsland(active ? -1 : i)
-                    if (!active) {
-                      setCutAxis(m.axis)
-                      setDropInFloorZ(m.floor)
-                      setBrushColor(m.colorId)
-                    }
-                  }}
-                >
-                  <span
-                    className="island-chip"
-                    style={{ background: col.hex }}
-                  />
-                  <span>
-                    #{i + 1} · {island.size} faces · {m.axis} @{' '}
-                    {m.floor.toFixed(1)} · {col.name}
-                  </span>
-                </button>
-              )
-            })}
-            <button
-              type="button"
-              disabled={activeIsland < 0 || activeIsland >= dropInIslands.length}
-              onClick={() => {
-                if (activeIsland < 0 || activeIsland >= dropInIslands.length)
-                  return
-                applyBrushToIslands([dropInIslands[activeIsland]!])
-              }}
-            >
-              Apply brush to selected feature
-            </button>
-          </div>
-        )}
-        <div className="row">
-          <span className="label">
-            {insertsOnly
-              ? `Painting inserts (${activeColor.name})`
-              : `Painting: ${paintTarget === 'structural' ? 'bottom (orange)' : `drop-in (${activeColor.name})`}`}
-          </span>
-          <div style={{ display: 'flex', gap: 4 }}>
-            <button onClick={undo} disabled={undoStack.length === 0} title="Ctrl/Cmd+Z">
-              Undo
-            </button>
-            <button
-              onClick={clearSelection}
-              disabled={structural.size === 0 && dropIn.size === 0}
-            >
-              Clear
-            </button>
-          </div>
-        </div>
-        <div className="help">
-          {insertsOnly
-            ? 'Paint regions that become separate inserts. Hold Shift to deselect. Holes are cut from the full body.'
-            : 'Bottom (fused) stays on the chassis. Drop-in inserts are separate parts. Hold Shift to deselect.'}
-        </div>
-      </section>
-
-      <section>
-        <h3>Preview</h3>
-        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-          <button
-            className={preview ? 'active' : ''}
-            onClick={() => setPreview(!preview)}
-            disabled={!model || busy}
-          >
-            {preview ? 'Hide preview' : 'Show preview'}
-          </button>
-          <label className="row" title="X-ray outlines of each insert curtain">
-            <input
-              type="checkbox"
-              checked={esp}
-              onChange={(e) => setEsp(e.target.checked)}
-            />
-            <span className="label">ESP outlines</span>
-          </label>
-        </div>
-        {preview && (
-          <div className="row stack">
-            <span className="label">Explode</span>
-            <div className="row">
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={explode}
-                onChange={(e) => setExplode(parseFloat(e.target.value))}
-              />
-              <span className="value">{Math.round(explode * 100)}%</span>
-            </div>
-          </div>
-        )}
-        <div className="help">
-          {insertsOnly
-            ? 'Body stays put; inserts lift out (blue).'
-            : 'Bottom drops, upper lifts, drop-in inserts rise further (blue).'}
-        </div>
-      </section>
-
-      <section>
-        <h3>Export</h3>
-        <div className="actions">
-          <button
-            className="primary"
-            onClick={() => doExport('bottom')}
-            disabled={!model || busy}
-          >
-            {insertsOnly ? 'Download body' : 'Download bottom'}
-          </button>
-          {!insertsOnly && (
-            <button
-              className="primary"
-              onClick={() => doExport('upper')}
-              disabled={!model || busy}
-            >
-              Download upper
-            </button>
-          )}
-          <button
-            className="primary"
-            onClick={() => doExport('dropIns')}
-            disabled={!model || busy || dropIn.size === 0}
-          >
-            Download inserts (.zip)
-          </button>
-        </div>
-        {error && (
-          <div className="help" style={{ color: 'var(--danger)' }}>
-            {error}
-          </div>
-        )}
-        <div className="help">
-          {insertsOnly ? (
-            <>
-              <code>_body.stl</code> — full model with insert holes.{' '}
-              <code>_inserts.zip</code> — one STL per insert (
-              <code>_insert_1_red.stl</code>, …).
-            </>
-          ) : (
-            <>
-              <code>_bottom.stl</code> — chassis ∪ fused features.{' '}
-              <code>_upper.stl</code> — shell with holes.{' '}
-              <code>_inserts.zip</code> — one STL per drop-in (
-              <code>_insert_1_red.stl</code>, …).
-            </>
-          )}
-        </div>
       </section>
     </aside>
   )
