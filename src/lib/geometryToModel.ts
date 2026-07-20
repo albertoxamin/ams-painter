@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { MeshBVH } from 'three-mesh-bvh'
-import type { Model } from '../state'
+import type { Model } from '../domain/model'
 import { buildAdjacency } from './select'
 
 /**

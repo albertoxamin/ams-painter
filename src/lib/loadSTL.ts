@@ -1,6 +1,6 @@
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { MeshBVH } from 'three-mesh-bvh'
-import type { Model } from '../state'
+import type { Model } from '../domain/model'
 import { buildAdjacency } from './select'
 
 /**

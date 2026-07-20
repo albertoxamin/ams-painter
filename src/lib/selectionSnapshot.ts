@@ -1,6 +1,6 @@
 import type { CutAxis, InsertMeta, PaletteColor } from './extrude'
 import type { PenCutout } from './penCutout'
-import type { Model } from '../state'
+import type { Model } from '../domain/model'
 
 export const SELECTION_SNAPSHOT_VERSION = 1
 

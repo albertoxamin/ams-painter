@@ -1,47 +1,28 @@
-import { useState } from 'react'
-import Viewport from './components/Viewport'
-import SidePanel from './components/SidePanel'
-import RepairTab from './components/RepairTab'
-import WheelTab from './components/WheelTab'
-
-type Tab = 'painter' | 'repair' | 'wheels'
+import { Suspense, useState } from 'react'
+import { APP_FEATURES, type AppFeatureId } from './features/registry'
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>('painter')
+  const [tab, setTab] = useState<AppFeatureId>('painter')
+  const active = APP_FEATURES.find((f) => f.id === tab) ?? APP_FEATURES[0]!
+  const Active = active.Component
 
   return (
     <div className="app-shell">
       <nav className="tab-bar">
-        <button
-          className={tab === 'painter' ? 'active' : ''}
-          onClick={() => setTab('painter')}
-        >
-          Multi-color painter
-        </button>
-        <button
-          className={tab === 'repair' ? 'active' : ''}
-          onClick={() => setTab('repair')}
-        >
-          GLB → STL repair
-        </button>
-        <button
-          className={tab === 'wheels' ? 'active' : ''}
-          onClick={() => setTab('wheels')}
-        >
-          Toy car wheels
-        </button>
+        {APP_FEATURES.map((feature) => (
+          <button
+            key={feature.id}
+            className={tab === feature.id ? 'active' : ''}
+            onClick={() => setTab(feature.id)}
+          >
+            {feature.label}
+          </button>
+        ))}
       </nav>
 
-      {tab === 'painter' ? (
-        <div className="app">
-          <Viewport />
-          <SidePanel />
-        </div>
-      ) : tab === 'repair' ? (
-        <RepairTab />
-      ) : (
-        <WheelTab />
-      )}
+      <Suspense fallback={<div className="panel section">Loading…</div>}>
+        <Active />
+      </Suspense>
     </div>
   )
 }

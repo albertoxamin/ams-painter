@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:scripts": "vite-node scripts/test-pipeline.mjs && vite-node scripts/test-pen-cut.mjs",
     "lint": "oxlint",
     "preview": "vite preview"
   },
@@ -16,7 +19,6 @@
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "three": "^0.185.1",
-    "three-bvh-csg": "^0.0.18",
     "three-mesh-bvh": "^0.9.11",
     "zustand": "^5.0.14"
   },
@@ -29,6 +31,7 @@
     "oxlint": "^1.71.0",
     "typescript": "~6.0.2",
     "vite": "^8.1.1",
-    "vite-node": "^6.0.0"
+    "vite-node": "^6.0.0",
+    "vitest": "^3.2.4"
   }
 }

@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import type { Model } from '../state'
+import type { Model } from '../domain/model'
 
 /** Position-based vertex key (non-indexed geometries duplicate verts, so we
  * must key by rounded coordinates, not by vertex index). */

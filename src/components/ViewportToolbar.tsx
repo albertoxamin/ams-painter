@@ -1,4 +1,8 @@
 import { useStore, paletteColor } from '../state'
+import {
+  PAINT_TOOL_REGISTRY,
+  paintToolHint,
+} from '../features/painter/tools/registry'
 
 export default function ViewportToolbar() {
   const model = useStore((s) => s.model)
@@ -29,7 +33,7 @@ export default function ViewportToolbar() {
           <button
             type="button"
             className={paintTool === 'brush' ? 'active' : ''}
-            title="Brush (B)"
+            title={`${PAINT_TOOL_REGISTRY.brush.label} (${PAINT_TOOL_REGISTRY.brush.shortcut})`}
             onClick={() => setPaintTool('brush')}
           >
             Brush
@@ -37,7 +41,7 @@ export default function ViewportToolbar() {
           <button
             type="button"
             className={paintTool === 'pen' ? 'active' : ''}
-            title="Pen (P)"
+            title={`${PAINT_TOOL_REGISTRY.pen.label} (${PAINT_TOOL_REGISTRY.pen.shortcut})`}
             onClick={() => setPaintTool('pen')}
           >
             Pen
@@ -143,17 +147,12 @@ export function ViewportHint() {
 
   if (!model) return null
 
-  let hint = ''
-  if (paintTool === 'pen') {
-    hint =
-      'Click points on the model · Enter to finish · Backspace undo point · Esc cancel'
-  } else if (mode === 'remove') {
-    hint = 'Drag to erase painted areas · Hold Shift while dragging'
-  } else if (insertsOnly || paintTarget === 'dropIn') {
-    hint = `Painting ${activeColor.name} inserts · Drag to mark · Shift = erase`
-  } else {
-    hint = 'Painting fused bottom features (orange) · Drag to mark'
-  }
+  const hint = paintToolHint(paintTool, {
+    mode,
+    paintTarget,
+    insertsOnly,
+    colorName: activeColor.name,
+  })
 
   return <div className="viewport-hint">{hint}</div>
 }

@@ -11,8 +11,8 @@ import {
   parseSelectionSnapshot,
   validateSnapshotForModel,
 } from '../lib/selectionSnapshot'
-import { prepareParts } from '../lib/prepareParts'
 import { countSelectionIslands, listSelectionIslands } from '../lib/select'
+import { awaitPreparedParts } from '../features/painter/prepare/usePreparedParts'
 import { CUT_AXES, AXIS_COLORS, axisBounds, axisLetter } from '../lib/extrude'
 
 export default function SidePanel() {
@@ -200,24 +200,26 @@ export default function SidePanel() {
     }
   }
 
-  const runPrepare = () => {
-    if (!model) return null
-    return prepareParts(
-      model.geometry,
+  const runPrepare = async () => {
+    const prepared = await awaitPreparedParts({
+      model,
       splitHeight,
       structural,
       dropIn,
-      model.zMin,
+      dropInMeta,
+      penCutouts,
       clearance,
-      {
-        dropInFloorZ,
-        insertsOnly,
-        cutAxis,
-        dropInMeta,
-        adjacency: model.adjacency,
-        penCutouts,
-      },
-    )
+      dropInFloorZ,
+      insertsOnly,
+      cutAxis,
+    })
+    if (!prepared) return null
+    return {
+      bottom: prepared.lower,
+      upper: prepared.upper,
+      dropIns: prepared.dropIns,
+      insertsOnly: prepared.insertsOnly,
+    }
   }
 
   const doExport = async (which: 'bottom' | 'upper' | 'dropIns') => {

@@ -1,44 +1,25 @@
 import { create } from 'zustand'
-import * as THREE from 'three'
-import { MeshBVH } from 'three-mesh-bvh'
 import {
   axisBounds,
   type CutAxis,
   type InsertMeta,
   type PaletteColor,
 } from './lib/extrude'
+import { type PenCutout, newPenCutoutId } from './lib/penCutout'
+import type { Model } from './domain/model'
 import {
-  type PenCutout,
-  newPenCutoutId,
-} from './lib/penCutout'
+  DEFAULT_PALETTE,
+  resolveIslandMeta,
+  paletteColor,
+  colorSlug,
+} from './domain/palette'
 
 export type SelectionMode = 'add' | 'remove'
 export type PaintTool = 'brush' | 'pen'
 /** Where painted faces go: fused into bottom, or separate drop-in inserts. */
 export type PaintTarget = 'structural' | 'dropIn'
-export type { CutAxis, InsertMeta, PaletteColor, PenCutout }
-
-export interface Model {
-  geometry: THREE.BufferGeometry
-  bvh: MeshBVH
-  /** triangle count */
-  count: number
-  /** edge-adjacent triangle neighbors (by position), cached at load */
-  adjacency: number[][]
-  /** z bounds in model-local space (model is dropped to bed z=0) */
-  zMin: number
-  zMax: number
-  name: string
-}
-
-const MAX_UNDO = 50
-
-export const DEFAULT_PALETTE: PaletteColor[] = [
-  { id: 'red', name: 'Red', hex: '#e74c3c' },
-  { id: 'blue', name: 'Blue', hex: '#5ec8ff' },
-  { id: 'yellow', name: 'Yellow', hex: '#f1c40f' },
-  { id: 'white', name: 'White', hex: '#ecf0f1' },
-]
+export type { CutAxis, InsertMeta, PaletteColor, PenCutout, Model }
+export { DEFAULT_PALETTE, resolveIslandMeta, paletteColor, colorSlug }
 
 interface SelSnap {
   structural: Set<number>
@@ -46,6 +27,8 @@ interface SelSnap {
   dropInMeta: Map<number, InsertMeta>
   penCutouts: PenCutout[]
 }
+
+const MAX_UNDO = 50
 
 interface State {
   model: Model | null
@@ -219,53 +202,6 @@ function brushMetaFrom(s: {
 
 function newColorId(): string {
   return `c_${Math.random().toString(36).slice(2, 9)}`
-}
-
-/** Resolve cut settings for an island from per-face meta (majority vote). */
-export function resolveIslandMeta(
-  faces: Set<number>,
-  meta: Map<number, InsertMeta>,
-  fallback: InsertMeta,
-): InsertMeta {
-  const votes = new Map<string, { meta: InsertMeta; n: number }>()
-  for (const f of faces) {
-    const m = meta.get(f) ?? fallback
-    const entryKey =
-      m.entry !== undefined ? m.entry.toFixed(3) : '_'
-    const key = `${m.axis}|${m.floor.toFixed(3)}|${entryKey}|${m.colorId}`
-    const cur = votes.get(key)
-    if (cur) cur.n++
-    else votes.set(key, { meta: m, n: 1 })
-  }
-  let best: InsertMeta = fallback
-  let bestN = -1
-  for (const v of votes.values()) {
-    if (v.n > bestN) {
-      bestN = v.n
-      best = v.meta
-    }
-  }
-  return best
-}
-
-export function paletteColor(
-  palette: PaletteColor[],
-  id: string | undefined,
-): PaletteColor {
-  return (
-    palette.find((c) => c.id === id) ??
-    palette[0] ?? { id: 'blue', name: 'Blue', hex: '#5ec8ff' }
-  )
-}
-
-/** Filename-safe slug from a color name. */
-export function colorSlug(name: string): string {
-  const s = name
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_|_$/g, '')
-  return s || 'color'
 }
 
 export const useStore = create<State>((set, get) => ({

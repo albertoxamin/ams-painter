@@ -1,17 +1,8 @@
 import * as THREE from 'three'
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js'
+import { colorSlug } from '../domain/palette'
+import { downloadBlob } from '../platform/io/downloadBlob'
 import { materializeDrawRange } from './manifoldOps'
-
-function downloadBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
-}
 
 /** STLExporter binary mode returns a DataView, not an ArrayBuffer. */
 function toBinarySTLBytes(root: THREE.Object3D): Uint8Array {
@@ -200,12 +191,7 @@ export function downloadInsertsZip(
   if (geoms.length === 0) return
   const files = geoms.map((g, i) => {
     const raw = colorNames?.[i]?.trim()
-    const slug = raw
-      ? raw
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, '_')
-          .replace(/^_|_$/g, '') || 'color'
-      : ''
+    const slug = raw ? colorSlug(raw) : ''
     const colorPart = slug ? `_${slug}` : ''
     const name =
       geoms.length === 1
