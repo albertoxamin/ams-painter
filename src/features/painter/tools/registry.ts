@@ -32,9 +32,37 @@ export const PAINT_TOOL_REGISTRY: Record<PaintTool, PaintToolDefinition> = {
     usesBrushRadius: false,
     usesPaintTarget: false,
   },
+  flood: {
+    id: 'flood',
+    label: 'Flood',
+    shortcut: 'G',
+    hint: 'Click to fill a region · Stops when surface tilts away from the click · Shift = erase',
+    usesBrushRadius: false,
+    usesPaintTarget: true,
+  },
+  box: {
+    id: 'box',
+    label: 'Box',
+    shortcut: 'C',
+    hint: 'Drag a rectangle to select faces · Middle mouse to orbit · Shift = erase',
+    usesBrushRadius: false,
+    usesPaintTarget: true,
+  },
 }
 
 export const PAINT_TOOL_LIST = Object.values(PAINT_TOOL_REGISTRY)
+
+export const SHORTCUT_HELP = [
+  { keys: 'B / P / G / C', desc: 'Brush, Pen, Flood, Box tools' },
+  { keys: '1–4', desc: 'Palette colors' },
+  { keys: 'X Y Z', desc: 'Toggle cut axis / sign' },
+  { keys: '[ ]', desc: 'Brush radius' },
+  { keys: 'L', desc: 'Select linked (edge-connected island)' },
+  { keys: '⌘Z / ⌘⇧Z', desc: 'Undo / Redo' },
+  { keys: '⌘I', desc: 'Invert selection' },
+  { keys: 'Shift', desc: 'Erase while painting' },
+  { keys: '?', desc: 'This help overlay' },
+]
 
 export function paintToolHint(
   tool: PaintTool,
@@ -46,7 +74,7 @@ export function paintToolHint(
   },
 ): string {
   const def = PAINT_TOOL_REGISTRY[tool]
-  if (tool === 'pen') return def.hint
+  if (tool === 'pen' || tool === 'flood' || tool === 'box') return def.hint
   if (ctx.mode === 'remove') {
     return 'Drag to erase painted areas · Hold Shift while dragging'
   }

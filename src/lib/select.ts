@@ -71,36 +71,38 @@ function triangleNormal(geom: THREE.BufferGeometry, t: number, out: THREE.Vector
 }
 
 /**
- * Flood-fill from `startIdx` over triangle adjacency, stopping at edges where
- * the dihedral angle between adjacent triangles exceeds `maxAngleDeg`.
- * Returns the set of triangle indices (including startIdx).
+ * Flood-fill from `startIdx`, growing to adjacent triangles whose normals are
+ * within `maxAngleDeg` of the **seed** face normal. Using the seed (not the
+ * frontier face) keeps the fill local on curved surfaces instead of crawling
+ * around entire body panels.
  */
 export function floodSelect(
   model: Model,
   startIdx: number,
   maxAngleDeg: number,
   adjacency: number[][],
+  options?: { blocked?: Set<number> },
 ): number[] {
+  const blocked = options?.blocked
+  if (blocked?.has(startIdx)) return []
+
   const { geometry } = model
-  // cos(maxAngle) with a small epsilon so a perfect 90° crease at maxAngle=90
-  // passes (Math.cos(PI/2) is ~6e-17, not 0).
-  const cosLimit = Math.cos((maxAngleDeg * Math.PI) / 180) - 1e-9
+  const cosLimit = Math.cos((maxAngleDeg * Math.PI) / 180)
+  const seedNormal = new THREE.Vector3()
+  triangleNormal(geometry, startIdx, seedNormal)
+
   const result: number[] = []
   const seen = new Set<number>([startIdx])
   const queue: number[] = [startIdx]
-  const nA = new THREE.Vector3()
   const nB = new THREE.Vector3()
 
   while (queue.length) {
     const t = queue.shift()!
     result.push(t)
-    triangleNormal(geometry, t, nA)
-    for (const nb of adjacency[t]) {
-      if (seen.has(nb)) continue
+    for (const nb of adjacency[t] ?? []) {
+      if (seen.has(nb) || blocked?.has(nb)) continue
       triangleNormal(geometry, nb, nB)
-      // dihedral: dot of normals. Same plane -> 1, sharp crease -> lower.
-      const dot = nA.dot(nB)
-      if (dot >= cosLimit) {
+      if (seedNormal.dot(nB) >= cosLimit) {
         seen.add(nb)
         queue.push(nb)
       }
@@ -109,7 +111,26 @@ export function floodSelect(
   return result
 }
 
-/** Raycast into the model BVH and return the hit triangle index, or null. */
+/** Edge-connected triangle island (no angle limit). */
+export function meshIslandFrom(
+  startIdx: number,
+  adjacency: number[][],
+): number[] {
+  const seen = new Set<number>([startIdx])
+  const queue = [startIdx]
+  const out: number[] = []
+  while (queue.length) {
+    const t = queue.pop()!
+    out.push(t)
+    for (const nb of adjacency[t] ?? []) {
+      if (seen.has(nb)) continue
+      seen.add(nb)
+      queue.push(nb)
+    }
+  }
+  return out
+}
+
 export function pickTriangle(model: Model, ray: THREE.Ray): number | null {
   const hits = model.bvh.raycast(ray, THREE.DoubleSide)
   if (!hits.length) return null

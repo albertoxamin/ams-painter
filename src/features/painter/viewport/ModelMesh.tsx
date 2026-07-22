@@ -34,6 +34,7 @@ import { PenEspOutline } from './overlays/PenEspOutline'
 import { PenLoopOverlay } from './overlays/PenLoopOverlay'
 import { SelectionOverlay } from './overlays/SelectionOverlay'
 import { SplitCutOutline } from './overlays/SplitCutOutline'
+import { useInteraction } from '../interaction/InteractionContext'
 import { SplitPreview } from './SplitPreview'
 
 export function ModelMesh() {
@@ -64,8 +65,11 @@ export function ModelMesh() {
   const setError = useStore((s) => s.setError)
   const beginStroke = useStore((s) => s.beginStroke)
   const paintFaces = useStore((s) => s.paintFaces)
+  const floodPaintAt = useStore((s) => s.floodPaintAt)
+  const selectLinkedAt = useStore((s) => s.selectLinkedAt)
   const busy = useStore((s) => s.busy)
   const error = useStore((s) => s.error)
+  const { setIsPainting: setGlobalPainting } = useInteraction()
   const meshRef = useRef<THREE.Mesh>(null)
   const painting = useRef(false)
   const gizmoHit = useRef(false)
@@ -102,6 +106,7 @@ export function ModelMesh() {
   const setPainting = (v: boolean) => {
     painting.current = v
     setIsPainting(v)
+    setGlobalPainting(v)
   }
 
   const gizmoIslandIdx = isPainting
@@ -180,7 +185,28 @@ export function ModelMesh() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [paintTool, penDraft.length, addPenCutout])
+  }, [paintTool, penDraft.length, addPenCutout, hoverIdx, selectLinkedAt])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null
+      if (
+        t &&
+        (t.tagName === 'INPUT' ||
+          t.tagName === 'TEXTAREA' ||
+          t.tagName === 'SELECT' ||
+          t.isContentEditable)
+      ) {
+        return
+      }
+      if (e.key.toLowerCase() === 'l' && hoverIdx != null) {
+        e.preventDefault()
+        selectLinkedAt(hoverIdx)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [hoverIdx, selectLinkedAt])
 
   const paintAt = (e: ThreeEvent<PointerEvent>) => {
     if (!model || !meshRef.current) return
@@ -264,6 +290,20 @@ export function ModelMesh() {
       return
     }
 
+    if (paintTool === 'flood') {
+      e.stopPropagation()
+      if (!meshRef.current) return
+      const hit = pickHit(e, meshRef.current, model.count)
+      if (!hit) return
+      floodPaintAt(hit.idx, e.nativeEvent.shiftKey ? 'remove' : mode)
+      return
+    }
+
+    if (paintTool === 'box') {
+      // Box select is handled by BoxSelectLayer over the full viewport.
+      return
+    }
+
     e.stopPropagation()
     setPainting(true)
     lastPaintPoint.current = null
@@ -288,6 +328,7 @@ export function ModelMesh() {
 
   const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
     if (!model || !meshRef.current || busy || isDepthHandleDragging()) return
+
     if (paintTool === 'pen' && !painting.current) {
       if (gizmoHit.current || anyHitIsGizmo(e)) return
       const hit = pickHit(e, meshRef.current, model.count)
@@ -318,6 +359,7 @@ export function ModelMesh() {
     } catch {
       /* ignore */
     }
+
     // Short click on a drop-in face selects that island (gizmo / panel sync)
     if (
       painting.current &&

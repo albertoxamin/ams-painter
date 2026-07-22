@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { MeshBVH } from 'three-mesh-bvh'
 import type { Model } from '../domain/model'
 import { buildAdjacency } from './select'
+import { hashArrayBufferSync } from './meshHash'
 
 /**
  * Turn a BufferGeometry into a viewport-ready Model.
@@ -41,5 +42,10 @@ export function geometryToModel(
 
   const count = g.getAttribute('position').count / 3
   const adjacency = buildAdjacency(g)
-  return { geometry: g, bvh, count, adjacency, zMin, zMax, name }
+  const pos = g.getAttribute('position') as THREE.BufferAttribute
+  const arr = pos.array as Float32Array
+  const bytes = new Uint8Array(arr.length * 4)
+  bytes.set(new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength))
+  const meshHash = hashArrayBufferSync(bytes.buffer)
+  return { geometry: g, bvh, count, adjacency, zMin, zMax, name, meshHash }
 }

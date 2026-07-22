@@ -12,4 +12,6 @@ export interface Model {
   zMin: number
   zMax: number
   name: string
+  /** Content hash of source STL bytes (for autosave / project matching). */
+  meshHash: string
 }

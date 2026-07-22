@@ -1,24 +1,27 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, type CSSProperties } from 'react'
 import {
   useStore,
   resolveIslandMeta,
   paletteColor,
 } from '../state'
-import { downloadSTL, downloadInsertsZip } from '../lib/exportSTL'
+import { downloadSTL, downloadInsertsZip, downloadAllPartsZip } from '../lib/exportSTL'
 import {
   buildSelectionSnapshot,
   downloadSelectionSnapshot,
-  parseSelectionSnapshot,
+  downloadProjectFile,
+  parseProjectFile,
   validateSnapshotForModel,
+  MESH_TRI_WARN,
 } from '../lib/selectionSnapshot'
+import { tryRestoreAutosave } from '../lib/restoreAutosave'
 import { countSelectionIslands, listSelectionIslands } from '../lib/select'
 import { awaitPreparedParts } from '../features/painter/prepare/usePreparedParts'
 import { CUT_AXES, AXIS_COLORS, axisBounds, axisLetter } from '../lib/extrude'
+import CollapsibleSection from './layout/CollapsibleSection'
 
 export default function SidePanel() {
   const fileRef = useRef<HTMLInputElement>(null)
   const markingsRef = useRef<HTMLInputElement>(null)
-  const [advancedOpen, setAdvancedOpen] = useState(false)
 
   const model = useStore((s) => s.model)
   const splitHeight = useStore((s) => s.splitHeight)
@@ -51,6 +54,8 @@ export default function SidePanel() {
   const setExplode = useStore((s) => s.setExplode)
   const clearSelection = useStore((s) => s.clearSelection)
   const undo = useStore((s) => s.undo)
+  const redo = useStore((s) => s.redo)
+  const invertSelection = useStore((s) => s.invertSelection)
   const setModel = useStore((s) => s.setModel)
   const setError = useStore((s) => s.setError)
   const busy = useStore((s) => s.busy)
@@ -95,9 +100,19 @@ export default function SidePanel() {
       }
 
       const mod = e.metaKey || e.ctrlKey
+      if (mod && e.key.toLowerCase() === 'z' && e.shiftKey) {
+        e.preventDefault()
+        redo()
+        return
+      }
       if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) {
         e.preventDefault()
         undo()
+        return
+      }
+      if (mod && e.key.toLowerCase() === 'i') {
+        e.preventDefault()
+        invertSelection()
         return
       }
       if (mod || e.altKey) return
@@ -144,11 +159,21 @@ export default function SidePanel() {
       if (key === 'p') {
         e.preventDefault()
         setPaintTool('pen')
+        return
+      }
+      if (key === 'g') {
+        e.preventDefault()
+        setPaintTool('flood')
+        return
+      }
+      if (key === 'c') {
+        e.preventDefault()
+        setPaintTool('box')
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [undo, setBrushColor, setCutAxis, setBrushRadius, setPaintTool])
+  }, [undo, redo, invertSelection, setBrushColor, setCutAxis, setBrushRadius, setPaintTool])
 
   const onFile = async (file: File) => {
     try {
@@ -156,8 +181,88 @@ export default function SidePanel() {
       const { loadSTL } = await import('../lib/loadSTL')
       const m = loadSTL(buf, file.name)
       setModel(m)
+      if (m.count > MESH_TRI_WARN) {
+        setError(
+          `Large mesh (${m.count.toLocaleString()} tris). Consider simplifying in Repair tab first.`,
+        )
+      } else {
+        setError(null)
+      }
+      await tryRestoreAutosave(m, restoreSelectionSnapshot)
     } catch (e) {
       setError((e as Error).message || 'Failed to load STL')
+    }
+  }
+
+  const loadDemo = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const stlUrl = `${import.meta.env.BASE_URL}dodge-viper-gen2.stl`
+      const res = await fetch(stlUrl)
+      if (!res.ok) throw new Error('Demo STL not found')
+      const buf = await res.arrayBuffer()
+      const { loadSTL } = await import('../lib/loadSTL')
+      const m = loadSTL(buf, 'dodge-viper-gen2.stl')
+      setModel(m)
+      const markingsRes = await fetch(
+        `${import.meta.env.BASE_URL}selections/dodge-viper-gen2.json`,
+      )
+      if (markingsRes.ok) {
+        const snap = parseProjectFile(await markingsRes.json())
+        const mismatch = validateSnapshotForModel(snap, m)
+        if (!mismatch) restoreSelectionSnapshot(snap)
+      } else {
+        await tryRestoreAutosave(m, restoreSelectionSnapshot)
+      }
+    } catch (e) {
+      setError((e as Error).message || 'Failed to load demo')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const doExportAll = async () => {
+    if (!model) return
+    setBusy(true)
+    setError(null)
+    try {
+      const parts = await runPrepare()
+      if (!parts) return
+      const colorNames = [
+        ...dropInIslands.map((island) => {
+          const m = resolveIslandMeta(island, dropInMeta, brushMeta)
+          return paletteColor(palette, m.colorId).name
+        }),
+        ...penCutouts.map((c) => paletteColor(palette, c.meta.colorId).name),
+      ]
+      const snap = buildSelectionSnapshot({
+        model,
+        insertsOnly,
+        splitHeight,
+        cutAxis,
+        dropInFloorZ,
+        brushColorId,
+        clearance,
+        palette,
+        structural,
+        dropIn,
+        dropInMeta,
+        penCutouts,
+      })
+      downloadAllPartsZip({
+        baseName: model.name,
+        bottom: parts.bottom,
+        upper: parts.upper,
+        dropIns: parts.dropIns,
+        dropInNames: colorNames,
+        insertsOnly: parts.insertsOnly,
+        snapshot: snap,
+      })
+    } catch (e) {
+      setError((e as Error).message || 'Export failed')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -180,6 +285,25 @@ export default function SidePanel() {
     downloadSelectionSnapshot(snap, model.name)
   }
 
+  const saveProject = () => {
+    if (!model) return
+    const snap = buildSelectionSnapshot({
+      model,
+      insertsOnly,
+      splitHeight,
+      cutAxis,
+      dropInFloorZ,
+      brushColorId,
+      clearance,
+      palette,
+      structural,
+      dropIn,
+      dropInMeta,
+      penCutouts,
+    })
+    downloadProjectFile(snap, model.name)
+  }
+
   const onMarkingsFile = async (file: File) => {
     if (!model) {
       setError('Load the STL first, then load markings')
@@ -187,7 +311,7 @@ export default function SidePanel() {
     }
     try {
       const text = await file.text()
-      const snap = parseSelectionSnapshot(JSON.parse(text))
+      const snap = parseProjectFile(JSON.parse(text))
       const mismatch = validateSnapshotForModel(snap, model)
       if (mismatch) {
         setError(mismatch)
@@ -263,32 +387,36 @@ export default function SidePanel() {
   }
 
   return (
-    <aside className="panel">
-      <section className="panel-hero">
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".stl"
-          style={{ display: 'none' }}
-          onChange={(e) => {
-            const f = e.target.files?.[0]
-            if (f) onFile(f)
-            e.target.value = ''
-          }}
-        />
-        <input
-          ref={markingsRef}
-          type="file"
-          accept=".json,application/json"
-          style={{ display: 'none' }}
-          onChange={(e) => {
-            const f = e.target.files?.[0]
-            if (f) void onMarkingsFile(f)
-            e.target.value = ''
-          }}
-        />
+    <aside className="properties-panel" aria-label="Properties">
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".stl"
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) onFile(f)
+          e.target.value = ''
+        }}
+      />
+      <input
+        ref={markingsRef}
+        type="file"
+        accept=".json,application/json"
+        style={{ display: 'none' }}
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) void onMarkingsFile(f)
+          e.target.value = ''
+        }}
+      />
+
+      <CollapsibleSection title="Scene" defaultOpen>
         <button className="primary block" onClick={() => fileRef.current?.click()}>
-          {model ? 'Change model' : 'Load STL'}
+          {model ? 'Change model' : 'Open STL'}
+        </button>
+        <button type="button" className="block subtle" disabled={busy} onClick={() => void loadDemo()}>
+          Load demo (Viper)
         </button>
         {model && (
           <div className="actions compact">
@@ -303,45 +431,52 @@ export default function SidePanel() {
             <button
               type="button"
               className="block"
+              disabled={!hasMarks}
+              onClick={saveProject}
+            >
+              Save project (.amspaint)
+            </button>
+            <button
+              type="button"
+              className="block"
               onClick={() => markingsRef.current?.click()}
             >
-              Load markings
+              Load markings / project
             </button>
           </div>
         )}
-        {model && (
-          <p className="model-meta">
-            {model.name} · {model.count.toLocaleString()} tris
+        {model && model.count > MESH_TRI_WARN && (
+          <p className="error-text">
+            Large mesh ({model.count.toLocaleString()} tris) — painting may be
+            slow. Try GLB repair to decimate first.
           </p>
         )}
-        <div className="segmented">
-          <button
-            type="button"
-            className={insertsOnly ? 'active' : ''}
-            onClick={() => setInsertsOnly(true)}
-          >
-            Inserts only
-          </button>
-          <button
-            type="button"
-            className={!insertsOnly ? 'active' : ''}
-            onClick={() => setInsertsOnly(false)}
-          >
-            Split model
-          </button>
+        <div className="bpy-prop-row">
+          <span className="bpy-prop-label">Workflow</span>
+          <div className="bpy-prop-buttons">
+            <button
+              type="button"
+              className={insertsOnly ? 'active' : ''}
+              onClick={() => setInsertsOnly(true)}
+            >
+              Inserts
+            </button>
+            <button
+              type="button"
+              className={!insertsOnly ? 'active' : ''}
+              onClick={() => setInsertsOnly(false)}
+            >
+              Split
+            </button>
+          </div>
         </div>
-      </section>
+      </CollapsibleSection>
 
-      <section>
-        <div className="section-head">
-          <h3>Your inserts</h3>
-          <span className="badge-count">{insertCount}</span>
-        </div>
-
+      <CollapsibleSection title="Insert regions" badge={insertCount || undefined}>
         {insertCount === 0 ? (
           <p className="empty-state">
-            Use the toolbar on the model to paint or draw insert regions. Each
-            color becomes a separate printed piece.
+            Paint or draw regions on the mesh. Each color becomes a separate
+            printed piece.
           </p>
         ) : (
           <ul className="feature-list">
@@ -416,7 +551,7 @@ export default function SidePanel() {
               applyBrushToIslands([dropInIslands[activeIsland]!])
             }
           >
-            Apply current color to selection
+            Apply color to selection
           </button>
         )}
         {activePenIndex >= 0 && activePenIndex < penCutouts.length && (
@@ -428,7 +563,7 @@ export default function SidePanel() {
               if (c) removePenCutout(c.id)
             }}
           >
-            Delete selected pen cutout
+            Delete pen cutout
           </button>
         )}
 
@@ -441,13 +576,12 @@ export default function SidePanel() {
             Clear all markings
           </button>
         )}
-      </section>
+      </CollapsibleSection>
 
-      <section>
-        <h3>Export</h3>
+      <CollapsibleSection title="Export" defaultOpen>
         {preview && (
-          <label className="tool-slider compact">
-            <span>Explode preview</span>
+          <label className="bpy-prop-row bpy-prop-slider">
+            <span className="bpy-prop-label">Explode</span>
             <input
               type="range"
               min={0}
@@ -456,7 +590,7 @@ export default function SidePanel() {
               value={explode}
               onChange={(e) => setExplode(parseFloat(e.target.value))}
             />
-            <span className="tool-val">{Math.round(explode * 100)}%</span>
+            <span className="bpy-prop-value">{Math.round(explode * 100)}%</span>
           </label>
         )}
         <label className="check-row">
@@ -468,6 +602,13 @@ export default function SidePanel() {
           Show cut depth guides
         </label>
         <div className="actions">
+          <button
+            className="primary"
+            onClick={() => void doExportAll()}
+            disabled={!model || busy}
+          >
+            Export all (.zip)
+          </button>
           <button
             className="primary"
             onClick={() => doExport('bottom')}
@@ -493,183 +634,169 @@ export default function SidePanel() {
           </button>
         </div>
         {error && <p className="error-text">{error}</p>}
-      </section>
+      </CollapsibleSection>
 
-      <section className="panel-advanced">
-        <button
-          type="button"
-          className="advanced-toggle"
-          aria-expanded={advancedOpen}
-          onClick={() => setAdvancedOpen((o) => !o)}
-        >
-          <span>Advanced settings</span>
-          <span className="chevron">{advancedOpen ? '▾' : '▸'}</span>
-        </button>
-
-        {advancedOpen && (
-          <div className="advanced-body">
-            {model && !insertsOnly && (
-              <label className="field">
-                <span>Split height (Z)</span>
-                <div className="field-row">
-                  <input
-                    type="range"
-                    min={model.zMin + 0.1}
-                    max={model.zMax - 0.1}
-                    step={0.1}
-                    value={splitHeight}
-                    onChange={(e) => setSplitHeight(parseFloat(e.target.value))}
-                  />
-                  <input
-                    type="number"
-                    min={model.zMin}
-                    max={model.zMax}
-                    step={0.1}
-                    value={Number(splitHeight.toFixed(1))}
-                    onChange={(e) =>
-                      setSplitHeight(parseFloat(e.target.value) || 0)
-                    }
-                  />
-                </div>
-              </label>
-            )}
-
-            <label className="field">
-              <span>Default cut direction</span>
-              <div className="modes axes">
-                {CUT_AXES.map((a) => {
-                  const tint = AXIS_COLORS[axisLetter(a.id)]
-                  const active = cutAxis === a.id
-                  return (
-                    <button
-                      key={a.id}
-                      type="button"
-                      className={active ? 'active axis-tint' : 'axis-tint'}
-                      title={a.title}
-                      style={{ '--axis-tint': tint, color: tint } as CSSProperties}
-                      onClick={() => setCutAxis(a.id)}
-                    >
-                      {a.label}
-                    </button>
-                  )
-                })}
-              </div>
-            </label>
-
-            <label className="field">
-              <span>Default pocket depth ({cutAxis})</span>
-              <div className="field-row">
-                <input
-                  type="range"
-                  min={floorBounds.min}
-                  max={floorBounds.max - 0.1}
-                  step={0.1}
-                  value={dropInFloorZ}
-                  onChange={(e) => setDropInFloorZ(parseFloat(e.target.value))}
-                />
-                <input
-                  type="number"
-                  min={floorBounds.min}
-                  max={floorBounds.max}
-                  step={0.1}
-                  value={Number(dropInFloorZ.toFixed(1))}
-                  onChange={(e) =>
-                    setDropInFloorZ(parseFloat(e.target.value) || floorBounds.min)
-                  }
-                />
-              </div>
-            </label>
-
-            <label className="field">
-              <span>Print clearance</span>
-              <div className="field-row">
-                <input
-                  type="range"
-                  min={0}
-                  max={0.5}
-                  step={0.05}
-                  value={clearance}
-                  onChange={(e) => setClearance(parseFloat(e.target.value))}
-                />
-                <input
-                  type="number"
-                  min={0}
-                  max={2}
-                  step={0.05}
-                  value={Number(clearance.toFixed(2))}
-                  onChange={(e) => setClearance(parseFloat(e.target.value) || 0)}
-                />
-              </div>
-            </label>
-
-            <div className="field">
-              <span>Color names (for export files)</span>
-              <div className="swatch-row">
-                {palette.map((c, i) => (
-                  <button
-                    key={c.id}
-                    type="button"
-                    className={`swatch${brushColorId === c.id ? ' active' : ''}`}
-                    title={i < 4 ? `${c.name} (${i + 1})` : c.name}
-                    style={{ background: c.hex }}
-                    onClick={() => setBrushColor(c.id)}
-                  />
-                ))}
-                <button
-                  type="button"
-                  className="swatch add"
-                  onClick={() => addPaletteColor()}
-                >
-                  +
-                </button>
-              </div>
+      <CollapsibleSection title="Advanced" defaultOpen={false}>
+        {model && !insertsOnly && (
+          <label className="field">
+            <span>Split height (Z)</span>
+            <div className="field-row">
               <input
-                type="text"
-                value={activeColor.name}
-                placeholder="Color name"
+                type="range"
+                min={model.zMin + 0.1}
+                max={model.zMax - 0.1}
+                step={0.1}
+                value={splitHeight}
+                onChange={(e) => setSplitHeight(parseFloat(e.target.value))}
+              />
+              <input
+                type="number"
+                min={model.zMin}
+                max={model.zMax}
+                step={0.1}
+                value={Number(splitHeight.toFixed(1))}
                 onChange={(e) =>
-                  updatePaletteColor(activeColor.id, { name: e.target.value })
+                  setSplitHeight(parseFloat(e.target.value) || 0)
                 }
               />
-              <div className="field-row">
-                <input
-                  type="color"
-                  value={
-                    /^#[0-9a-fA-F]{6}$/.test(activeColor.hex)
-                      ? activeColor.hex
-                      : '#5ec8ff'
-                  }
-                  onChange={(e) =>
-                    updatePaletteColor(activeColor.id, { hex: e.target.value })
-                  }
-                />
-                <input
-                  type="text"
-                  value={activeColor.hex}
-                  onChange={(e) =>
-                    updatePaletteColor(activeColor.id, { hex: e.target.value })
-                  }
-                />
-                <button
-                  type="button"
-                  className="danger"
-                  disabled={palette.length <= 1}
-                  onClick={() => removePaletteColor(activeColor.id)}
-                >
-                  Remove
-                </button>
-              </div>
             </div>
-
-            {!insertsOnly && structural.size > 0 && (
-              <p className="hint-line">
-                Fused bottom: {countSelectionIslands(structural, model!.adjacency)}{' '}
-                region{countSelectionIslands(structural, model!.adjacency) === 1 ? '' : 's'}
-              </p>
-            )}
-          </div>
+          </label>
         )}
-      </section>
+
+        <label className="field">
+          <span>Default cut direction</span>
+          <div className="modes axes">
+            {CUT_AXES.map((a) => {
+              const tint = AXIS_COLORS[axisLetter(a.id)]
+              const active = cutAxis === a.id
+              return (
+                <button
+                  key={a.id}
+                  type="button"
+                  className={active ? 'active axis-tint' : 'axis-tint'}
+                  title={a.title}
+                  style={{ '--axis-tint': tint, color: tint } as CSSProperties}
+                  onClick={() => setCutAxis(a.id)}
+                >
+                  {a.label}
+                </button>
+              )
+            })}
+          </div>
+        </label>
+
+        <label className="field">
+          <span>Default pocket depth ({cutAxis})</span>
+          <div className="field-row">
+            <input
+              type="range"
+              min={floorBounds.min}
+              max={floorBounds.max - 0.1}
+              step={0.1}
+              value={dropInFloorZ}
+              onChange={(e) => setDropInFloorZ(parseFloat(e.target.value))}
+            />
+            <input
+              type="number"
+              min={floorBounds.min}
+              max={floorBounds.max}
+              step={0.1}
+              value={Number(dropInFloorZ.toFixed(1))}
+              onChange={(e) =>
+                setDropInFloorZ(parseFloat(e.target.value) || floorBounds.min)
+              }
+            />
+          </div>
+        </label>
+
+        <label className="field">
+          <span>Print clearance</span>
+          <div className="field-row">
+            <input
+              type="range"
+              min={0}
+              max={0.5}
+              step={0.05}
+              value={clearance}
+              onChange={(e) => setClearance(parseFloat(e.target.value))}
+            />
+            <input
+              type="number"
+              min={0}
+              max={2}
+              step={0.05}
+              value={Number(clearance.toFixed(2))}
+              onChange={(e) => setClearance(parseFloat(e.target.value) || 0)}
+            />
+          </div>
+        </label>
+
+        <div className="field">
+          <span>Color names (for export files)</span>
+          <div className="swatch-row">
+            {palette.map((c, i) => (
+              <button
+                key={c.id}
+                type="button"
+                className={`swatch${brushColorId === c.id ? ' active' : ''}`}
+                title={i < 4 ? `${c.name} (${i + 1})` : c.name}
+                style={{ background: c.hex }}
+                onClick={() => setBrushColor(c.id)}
+              />
+            ))}
+            <button
+              type="button"
+              className="swatch add"
+              onClick={() => addPaletteColor()}
+            >
+              +
+            </button>
+          </div>
+          <input
+            type="text"
+            value={activeColor.name}
+            placeholder="Color name"
+            onChange={(e) =>
+              updatePaletteColor(activeColor.id, { name: e.target.value })
+            }
+          />
+          <div className="field-row">
+            <input
+              type="color"
+              value={
+                /^#[0-9a-fA-F]{6}$/.test(activeColor.hex)
+                  ? activeColor.hex
+                  : '#5ec8ff'
+              }
+              onChange={(e) =>
+                updatePaletteColor(activeColor.id, { hex: e.target.value })
+              }
+            />
+            <input
+              type="text"
+              value={activeColor.hex}
+              onChange={(e) =>
+                updatePaletteColor(activeColor.id, { hex: e.target.value })
+              }
+            />
+            <button
+              type="button"
+              className="danger"
+              disabled={palette.length <= 1}
+              onClick={() => removePaletteColor(activeColor.id)}
+            >
+              Remove
+            </button>
+          </div>
+        </div>
+
+        {!insertsOnly && structural.size > 0 && (
+          <p className="hint-line">
+            Fused bottom: {countSelectionIslands(structural, model!.adjacency)}{' '}
+            region{countSelectionIslands(structural, model!.adjacency) === 1 ? '' : 's'}
+          </p>
+        )}
+      </CollapsibleSection>
     </aside>
   )
 }

@@ -1,11 +1,11 @@
 import { create } from 'zustand'
-import {
-  axisBounds,
+import { axisBounds,
   type CutAxis,
   type InsertMeta,
   type PaletteColor,
 } from './lib/extrude'
 import { type PenCutout, newPenCutoutId } from './lib/penCutout'
+import { floodSelect, meshIslandFrom } from './lib/select'
 import type { Model } from './domain/model'
 import {
   DEFAULT_PALETTE,
@@ -15,7 +15,7 @@ import {
 } from './domain/palette'
 
 export type SelectionMode = 'add' | 'remove'
-export type PaintTool = 'brush' | 'pen'
+export type PaintTool = 'brush' | 'pen' | 'flood' | 'box'
 /** Where painted faces go: fused into bottom, or separate drop-in inserts. */
 export type PaintTarget = 'structural' | 'dropIn'
 export type { CutAxis, InsertMeta, PaletteColor, PenCutout, Model }
@@ -53,6 +53,7 @@ interface State {
   paintTarget: PaintTarget
   /** snapshots before each stroke / clear */
   undoStack: SelSnap[]
+  redoStack: SelSnap[]
   mode: SelectionMode
   /** brush radius in model units (mm) */
   brushRadius: number
@@ -78,6 +79,8 @@ interface State {
   esp: boolean
   /** 0 = assembled, 1 = fully exploded */
   explode: number
+  /** Flood-fill angle limit in degrees (vs seed face normal). */
+  floodAngleDeg: number
   /** working flag for CSG ops */
   busy: boolean
   error: string | null
@@ -88,6 +91,7 @@ interface State {
   setPaintTool: (t: PaintTool) => void
   setPaintTarget: (t: PaintTarget) => void
   setBrushRadius: (r: number) => void
+  setFloodAngleDeg: (deg: number) => void
   setClearance: (c: number) => void
   setDropInFloorZ: (z: number) => void
   setCutAxis: (a: CutAxis) => void
@@ -150,7 +154,14 @@ interface State {
   beginStroke: () => void
   /** Paint faces during an active stroke (no extra undo entries). */
   paintFaces: (idxs: number[], mode: SelectionMode) => void
+  /** Flood-fill from a seed triangle and paint the result. */
+  floodPaintAt: (faceIdx: number, mode: SelectionMode) => void
+  /** Select all faces in the edge-connected island containing faceIdx. */
+  selectLinkedAt: (faceIdx: number) => void
+  /** Invert selection in the active paint target. */
+  invertSelection: () => void
   undo: () => void
+  redo: () => void
   clearSelection: () => void
 }
 
@@ -188,6 +199,24 @@ function snap(s: State): SelSnap {
   }
 }
 
+function pushUndo(s: State): Partial<State> {
+  return {
+    undoStack: [...s.undoStack.slice(-(MAX_UNDO - 1)), snap(s)],
+    redoStack: [],
+  }
+}
+
+function restoreSnap(prev: SelSnap): Partial<State> {
+  return {
+    structural: prev.structural,
+    dropIn: prev.dropIn,
+    dropInMeta: prev.dropInMeta,
+    penCutouts: prev.penCutouts,
+    activeIsland: -1,
+    activePenIndex: -1,
+  }
+}
+
 function brushMetaFrom(s: {
   cutAxis: CutAxis
   dropInFloorZ: number
@@ -217,6 +246,7 @@ export const useStore = create<State>((set, get) => ({
   brushColorId: DEFAULT_PALETTE[0]!.id,
   paintTarget: 'structural',
   undoStack: [],
+  redoStack: [],
   mode: 'add',
   brushRadius: 1.5,
   clearance: 0.15,
@@ -227,6 +257,7 @@ export const useStore = create<State>((set, get) => ({
   preview: false,
   esp: true,
   explode: 0.45,
+  floodAngleDeg: 18,
   busy: false,
   error: null,
 
@@ -239,6 +270,7 @@ export const useStore = create<State>((set, get) => ({
       dropInMeta: new Map(),
       penCutouts: [],
       undoStack: [],
+      redoStack: [],
       preview: false,
       paintTarget: 'dropIn',
       paintTool: 'brush',
@@ -279,6 +311,8 @@ export const useStore = create<State>((set, get) => ({
     })),
   setPaintTarget: (t) => set({ paintTarget: t }),
   setBrushRadius: (r) => set({ brushRadius: Math.max(0.1, r) }),
+  setFloodAngleDeg: (deg) =>
+    set({ floodAngleDeg: Math.min(90, Math.max(1, deg)) }),
   setClearance: (c) => set({ clearance: Math.max(0, c) }),
   setDropInFloorZ: (z) =>
     set((s) => {
@@ -375,7 +409,7 @@ export const useStore = create<State>((set, get) => ({
         meta: { ...brush },
       }
       return {
-        undoStack: [...s.undoStack.slice(-(MAX_UNDO - 1)), snap(s)],
+        ...pushUndo(s),
         penCutouts: [...s.penCutouts, cutout],
         activePenIndex: s.penCutouts.length,
         paintTarget: 'dropIn' as PaintTarget,
@@ -388,7 +422,7 @@ export const useStore = create<State>((set, get) => ({
       if (idx < 0) return s
       const penCutouts = s.penCutouts.filter((c) => c.id !== id)
       return {
-        undoStack: [...s.undoStack.slice(-(MAX_UNDO - 1)), snap(s)],
+        ...pushUndo(s),
         penCutouts,
         activePenIndex:
           s.activePenIndex === idx
@@ -425,7 +459,7 @@ export const useStore = create<State>((set, get) => ({
           ? s.dropInFloorZ
           : (min + max) / 2
       return {
-        undoStack: [...s.undoStack.slice(-(MAX_UNDO - 1)), snap(s)],
+        ...pushUndo(s),
         penCutouts,
         cutAxis: axis,
         dropInFloorZ: brushFloor,
@@ -462,7 +496,7 @@ export const useStore = create<State>((set, get) => ({
         }
       }
       return {
-        undoStack: [...s.undoStack.slice(-(MAX_UNDO - 1)), snap(s)],
+        ...pushUndo(s),
         dropInMeta,
       }
     }),
@@ -492,7 +526,7 @@ export const useStore = create<State>((set, get) => ({
           ? s.dropInFloorZ
           : (min + max) / 2
       return {
-        undoStack: [...s.undoStack.slice(-(MAX_UNDO - 1)), snap(s)],
+        ...pushUndo(s),
         dropInMeta,
         cutAxis: axis,
         dropInFloorZ: brushFloor,
@@ -563,6 +597,7 @@ export const useStore = create<State>((set, get) => ({
   restoreSelectionSnapshot: (snap) => {
     const patch: Partial<State> = {
       undoStack: [],
+      redoStack: [],
       activeIsland: -1,
       activePenIndex: -1,
     }
@@ -614,10 +649,7 @@ export const useStore = create<State>((set, get) => ({
     )
   },
 
-  beginStroke: () =>
-    set((s) => ({
-      undoStack: [...s.undoStack.slice(-(MAX_UNDO - 1)), snap(s)],
-    })),
+  beginStroke: () => set((s) => pushUndo(s)),
 
   paintFaces: (idxs, mode) =>
     set((s) => {
@@ -651,19 +683,110 @@ export const useStore = create<State>((set, get) => ({
       return { structural, dropIn, dropInMeta }
     }),
 
+  floodPaintAt: (faceIdx, mode) => {
+    const s = get()
+    if (!s.model) return
+    const targetKind = s.insertsOnly ? 'dropIn' : s.paintTarget
+    const target = targetKind === 'structural' ? s.structural : s.dropIn
+
+    let blocked: Set<number>
+    if (mode === 'add') {
+      // Stop at any existing paint so a ring selection bounds the fill.
+      blocked = new Set([...s.structural, ...s.dropIn])
+      if (blocked.has(faceIdx)) return
+    } else {
+      if (!target.has(faceIdx)) return
+      blocked = new Set<number>()
+      for (let t = 0; t < s.model.count; t++) {
+        if (!target.has(t)) blocked.add(t)
+      }
+    }
+
+    const faces = floodSelect(
+      s.model,
+      faceIdx,
+      s.floodAngleDeg,
+      s.model.adjacency,
+      { blocked },
+    )
+    if (faces.length === 0) return
+    get().beginStroke()
+    get().paintFaces(faces, mode)
+  },
+
+  selectLinkedAt: (faceIdx) => {
+    const s = get()
+    if (!s.model) return
+    const faces = meshIslandFrom(faceIdx, s.model.adjacency)
+    get().beginStroke()
+    get().paintFaces(faces, s.mode)
+  },
+
+  invertSelection: () =>
+    set((s) => {
+      if (!s.model) return s
+      const triCount = s.model.count
+      const targetKind = s.insertsOnly ? 'dropIn' : s.paintTarget
+      const structural = cloneSel(s.structural)
+      const dropIn = cloneSel(s.dropIn)
+      const dropInMeta = cloneMeta(s.dropInMeta)
+      const brush = brushMetaFrom(s)
+
+      if (targetKind === 'dropIn') {
+        for (let i = 0; i < triCount; i++) {
+          if (s.structural.has(i)) continue
+          if (s.dropIn.has(i)) {
+            dropIn.delete(i)
+            dropInMeta.delete(i)
+          } else {
+            dropIn.add(i)
+            dropInMeta.set(i, { ...brush })
+          }
+        }
+      } else {
+        for (let i = 0; i < triCount; i++) {
+          if (s.dropIn.has(i)) continue
+          if (s.structural.has(i)) {
+            structural.delete(i)
+          } else {
+            structural.add(i)
+          }
+        }
+      }
+      for (const k of [...dropInMeta.keys()]) {
+        if (!dropIn.has(k)) dropInMeta.delete(k)
+      }
+      return {
+        ...pushUndo(s),
+        structural,
+        dropIn,
+        dropInMeta,
+        activeIsland: -1,
+        activePenIndex: -1,
+      }
+    }),
+
   undo: () =>
     set((s) => {
       if (s.undoStack.length === 0) return s
       const stack = s.undoStack.slice()
       const prev = stack.pop()!
       return {
-        structural: prev.structural,
-        dropIn: prev.dropIn,
-        dropInMeta: prev.dropInMeta,
-        penCutouts: prev.penCutouts,
+        ...restoreSnap(prev),
         undoStack: stack,
-        activeIsland: -1,
-        activePenIndex: -1,
+        redoStack: [...s.redoStack.slice(-(MAX_UNDO - 1)), snap(s)],
+      }
+    }),
+
+  redo: () =>
+    set((s) => {
+      if (s.redoStack.length === 0) return s
+      const stack = s.redoStack.slice()
+      const next = stack.pop()!
+      return {
+        ...restoreSnap(next),
+        redoStack: stack,
+        undoStack: [...s.undoStack.slice(-(MAX_UNDO - 1)), snap(s)],
       }
     }),
 
@@ -672,7 +795,7 @@ export const useStore = create<State>((set, get) => ({
     if (s.structural.size === 0 && s.dropIn.size === 0 && s.penCutouts.length === 0)
       return
     set({
-      undoStack: [...s.undoStack.slice(-(MAX_UNDO - 1)), snap(s)],
+      ...pushUndo(s),
       structural: new Set<number>(),
       dropIn: new Set<number>(),
       dropInMeta: new Map(),

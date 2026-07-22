@@ -9,22 +9,7 @@ export interface AppFeature {
   Component: ComponentType | LazyExoticComponent<ComponentType>
 }
 
-const PainterFeature = lazy(async () => {
-  const [{ default: Viewport }, { default: SidePanel }] = await Promise.all([
-    import('../components/Viewport'),
-    import('../components/SidePanel'),
-  ])
-  return {
-    default: function PainterFeature() {
-      return (
-        <div className="app">
-          <Viewport />
-          <SidePanel />
-        </div>
-      )
-    },
-  }
-})
+const PainterFeature = lazy(() => import('../components/layout/PainterWorkspace'))
 
 export const APP_FEATURES: AppFeature[] = [
   {

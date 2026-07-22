@@ -8,21 +8,27 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <nav className="tab-bar">
-        {APP_FEATURES.map((feature) => (
-          <button
-            key={feature.id}
-            className={tab === feature.id ? 'active' : ''}
-            onClick={() => setTab(feature.id)}
-          >
-            {feature.label}
-          </button>
-        ))}
-      </nav>
+      <header className="top-bar">
+        <div className="top-bar-brand">AMS Painter</div>
+        <nav className="workspace-tabs" aria-label="Workspaces">
+          {APP_FEATURES.map((feature) => (
+            <button
+              key={feature.id}
+              type="button"
+              className={tab === feature.id ? 'active' : ''}
+              onClick={() => setTab(feature.id)}
+            >
+              {feature.label}
+            </button>
+          ))}
+        </nav>
+      </header>
 
-      <Suspense fallback={<div className="panel section">Loading…</div>}>
-        <Active />
-      </Suspense>
+      <main className="workspace-main">
+        <Suspense fallback={<div className="workspace-loading">Loading…</div>}>
+          <Active />
+        </Suspense>
+      </main>
     </div>
   )
 }

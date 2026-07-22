@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js'
 import { colorSlug } from '../domain/palette'
 import { downloadBlob } from '../platform/io/downloadBlob'
+import type { SelectionSnapshot } from './selectionSnapshot'
 import { materializeDrawRange } from './manifoldOps'
 
 /** STLExporter binary mode returns a DataView, not an ArrayBuffer. */
@@ -200,4 +201,51 @@ export function downloadInsertsZip(
     return { name, data: geometryToSTLBuffer(g) }
   })
   downloadBlob(buildZip(files), `${baseName}_inserts.zip`)
+}
+
+/** Export body, optional upper shell, all inserts, and project markings in one ZIP. */
+export function downloadAllPartsZip(input: {
+  baseName: string
+  bottom: THREE.BufferGeometry
+  upper: THREE.BufferGeometry | null
+  dropIns: THREE.BufferGeometry[]
+  dropInNames?: (string | undefined)[]
+  insertsOnly: boolean
+  snapshot?: SelectionSnapshot
+}): void {
+  const files: { name: string; data: Uint8Array }[] = []
+  const base = input.baseName.replace(/\.stl$/i, '')
+
+  files.push({
+    name: input.insertsOnly ? `${base}_body.stl` : `${base}_bottom.stl`,
+    data: geometryToSTLBuffer(input.bottom),
+  })
+
+  if (input.upper) {
+    files.push({
+      name: `${base}_upper.stl`,
+      data: geometryToSTLBuffer(input.upper),
+    })
+  }
+
+  input.dropIns.forEach((g, i) => {
+    const raw = input.dropInNames?.[i]?.trim()
+    const slug = raw ? colorSlug(raw) : ''
+    const colorPart = slug ? `_${slug}` : ''
+    const name =
+      input.dropIns.length === 1
+        ? `${base}_insert${colorPart}.stl`
+        : `${base}_insert_${i + 1}${colorPart}.stl`
+    files.push({ name, data: geometryToSTLBuffer(g) })
+  })
+
+  if (input.snapshot) {
+    files.push({
+      name: `${base}.amspaint.json`,
+      data: new TextEncoder().encode(JSON.stringify(input.snapshot, null, 2)),
+    })
+  }
+
+  if (files.length === 0) return
+  downloadBlob(buildZip(files), `${base}_all_parts.zip`)
 }

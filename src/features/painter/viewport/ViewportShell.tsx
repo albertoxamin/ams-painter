@@ -3,17 +3,25 @@ import { Canvas } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { useStore } from '../../../state'
-import ViewportToolbar, { ViewportHint } from '../../../components/ViewportToolbar'
+import { MESH_TRI_WARN } from '../../../lib/selectionSnapshot'
+import { tryRestoreAutosave } from '../../../lib/restoreAutosave'
 import { InteractionProvider } from '../interaction/InteractionContext'
 import { useFileDrop } from '../../../platform/io/useFileDrop'
 import CameraRig from '../../../platform/scene/CameraRig'
 import ZUpGrid from '../../../platform/scene/ZUpGrid'
 import { ModelMesh } from './ModelMesh'
+import { BoxSelectOverlay } from '../../../components/BoxSelectOverlay'
+import BoxSelectLayer from '../../../components/BoxSelectLayer'
+import { ViewportPickBridge } from './ViewportPickBridge'
+import { OrbitControlsConfig } from './OrbitControlsConfig'
 
 export default function Viewport() {
   const model = useStore((s) => s.model)
+  const paintTool = useStore((s) => s.paintTool)
   const setModel = useStore((s) => s.setModel)
   const setError = useStore((s) => s.setError)
+
+  const restoreSelectionSnapshot = useStore((s) => s.restoreSelectionSnapshot)
 
   const onFile = useCallback(
     async (file: File) => {
@@ -22,18 +30,32 @@ export default function Viewport() {
         const { loadSTL } = await import('../../../lib/loadSTL')
         const m = loadSTL(buf, file.name)
         setModel(m)
+        if (m.count > MESH_TRI_WARN) {
+          setError(
+            `Large mesh (${m.count.toLocaleString()} tris). Painting may be slow — consider Repair tab to simplify first.`,
+          )
+        } else {
+          setError(null)
+        }
+        const restored = await tryRestoreAutosave(m, restoreSelectionSnapshot)
+        if (restored) {
+          setError(null)
+        }
       } catch (e) {
         setError((e as Error).message || 'Failed to load STL')
       }
     },
-    [setModel, setError],
+    [setModel, setError, restoreSelectionSnapshot],
   )
 
   const { dropActive, bind } = useFileDrop(onFile)
 
   return (
     <InteractionProvider>
-      <div className="viewport" {...bind()}>
+      <div
+        className={`viewport${paintTool === 'box' && model ? ' tool-box' : ''}`}
+        {...bind()}
+      >
         <Canvas
           shadows
           camera={{
@@ -46,7 +68,7 @@ export default function Viewport() {
           gl={{ antialias: true, preserveDrawingBuffer: false }}
           onCreated={({ camera, scene }) => {
             camera.up.set(0, 0, 1)
-            scene.background = new THREE.Color('#0a0c10')
+            scene.background = new THREE.Color('#1d1d1d')
           }}
         >
           <ambientLight intensity={0.6} />
@@ -59,6 +81,8 @@ export default function Viewport() {
           <ZUpGrid />
           <ModelMesh />
           <CameraRig model={model} />
+          <ViewportPickBridge />
+          <OrbitControlsConfig />
           <OrbitControls
             makeDefault
             target={[0, 0, 10]}
@@ -66,23 +90,14 @@ export default function Viewport() {
           />
         </Canvas>
 
-        <div className="overlay">
-          {model && (
-            <div className="badge">
-              {model.name} · {model.count.toLocaleString()} tris · z{' '}
-              {model.zMin.toFixed(1)}–{model.zMax.toFixed(1)}
-            </div>
-          )}
-        </div>
-
-        <ViewportToolbar />
-        <ViewportHint />
+        <BoxSelectLayer />
+        <BoxSelectOverlay />
 
         {!model && (
           <div className={`dropzone ${dropActive ? 'active' : ''}`}>
             <div className="card">
               <h2>Drop an STL here</h2>
-              <p>or use "Load STL" in the panel</p>
+              <p>or use Open STL in the properties panel</p>
             </div>
           </div>
         )}

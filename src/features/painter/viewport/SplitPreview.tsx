@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { useStore, resolveIslandMeta, paletteColor } from '../../../state'
 import { COLORS } from './constants'
 import { usePreparedParts } from '../prepare/usePreparedParts'
+import { useInteraction } from '../interaction/InteractionContext'
 
 export function SplitPreview({
   splitHeight,
@@ -29,6 +30,7 @@ export function SplitPreview({
   const clearance = useStore((s) => s.clearance)
   const insertsOnly = useStore((s) => s.insertsOnly)
   const penCutouts = useStore((s) => s.penCutouts)
+  const { isPainting } = useInteraction()
 
   const parts = usePreparedParts(
     {
@@ -46,6 +48,7 @@ export function SplitPreview({
     preview,
     setError,
     setBusy,
+    { paused: isPainting, debounceMs: 400 },
   )
 
   const box = model.geometry.boundingBox!

@@ -2,6 +2,7 @@ import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { MeshBVH } from 'three-mesh-bvh'
 import type { Model } from '../domain/model'
 import { buildAdjacency } from './select'
+import { hashArrayBufferSync } from './meshHash'
 
 /**
  * Parse an STL ArrayBuffer into a Model ready for the viewport.
@@ -47,5 +48,6 @@ export function loadSTL(buffer: ArrayBuffer, name: string): Model {
 
   const count = geom.getAttribute('position').count / 3
   const adjacency = buildAdjacency(geom)
-  return { geometry: geom, bvh, count, adjacency, zMin, zMax, name }
+  const meshHash = hashArrayBufferSync(buffer)
+  return { geometry: geom, bvh, count, adjacency, zMin, zMax, name, meshHash }
 }
