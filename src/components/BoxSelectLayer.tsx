@@ -12,6 +12,7 @@ export default function BoxSelectLayer() {
   const model = useStore((s) => s.model)
   const mode = useStore((s) => s.mode)
   const busy = useStore((s) => s.busy)
+  const preview = useStore((s) => s.preview)
   const beginStroke = useStore((s) => s.beginStroke)
   const paintFaces = useStore((s) => s.paintFaces)
   const { setBoxRect, setIsPainting, viewportPickRef } = useInteraction()
@@ -62,7 +63,7 @@ export default function BoxSelectLayer() {
   )
 
   useEffect(() => {
-    if (paintTool !== 'box' || !model || busy) {
+    if (paintTool !== 'box' || !model || busy || preview) {
       dragging.current = false
       start.current = null
       setBoxRect(null)
@@ -127,6 +128,7 @@ export default function BoxSelectLayer() {
     paintTool,
     model,
     busy,
+    preview,
     finishDrag,
     setBoxRect,
     setIsPainting,

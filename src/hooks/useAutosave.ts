@@ -19,6 +19,9 @@ export function useAutosave() {
   const brushColorId = useStore((s) => s.brushColorId)
   const clearance = useStore((s) => s.clearance)
   const palette = useStore((s) => s.palette)
+  const splitMode = useStore((s) => s.splitMode)
+  const splitLockAxis = useStore((s) => s.splitLockAxis)
+  const splitSpline = useStore((s) => s.splitSpline)
   const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   useEffect(() => {
@@ -29,6 +32,9 @@ export function useAutosave() {
         model,
         insertsOnly,
         splitHeight,
+        splitMode,
+        splitLockAxis,
+        splitSpline,
         cutAxis,
         dropInFloorZ,
         brushColorId,
@@ -62,5 +68,8 @@ export function useAutosave() {
     brushColorId,
     clearance,
     palette,
+    splitMode,
+    splitLockAxis,
+    splitSpline,
   ])
 }

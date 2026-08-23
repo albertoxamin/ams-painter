@@ -3,6 +3,8 @@ import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import Module from 'manifold-3d'
 import { ensureFloatGeometry } from './normalizeGeometry'
 
+type Vec3 = [number, number, number]
+
 type ManifoldCtor = {
   new (mesh: unknown): ManifoldSolid
   union(...args: ManifoldSolid[]): ManifoldSolid
@@ -10,6 +12,13 @@ type ManifoldCtor = {
   intersection(...args: ManifoldSolid[]): ManifoldSolid
   cube(size?: number | [number, number, number], center?: boolean): ManifoldSolid
   hull(points: readonly (ManifoldSolid | [number, number, number])[]): ManifoldSolid
+  levelSet(
+    sdf: (point: Vec3) => number,
+    bounds: { min: Vec3; max: Vec3 },
+    edgeLength: number,
+    level?: number,
+    tolerance?: number,
+  ): ManifoldSolid
 }
 
 type MeshCtor = {
@@ -73,32 +82,39 @@ export async function geomToManifold(
   geom: THREE.BufferGeometry,
 ): Promise<ManifoldSolid> {
   const { Manifold, Mesh } = await api()
-  const prepared = prepareForManifold(geom)
-  const pos = prepared.getAttribute('position') as THREE.BufferAttribute
-  const idx = prepared.index!
+  const welds: Array<number | false> = geom.userData?.manifoldClean
+    ? [false]
+    : [false, 1e-6, 1e-4]
+  let lastErr: unknown
+  for (const weld of welds) {
+    const prepared = prepareForManifold(geom, weld)
+    const pos = prepared.getAttribute('position') as THREE.BufferAttribute
+    const idx = prepared.index!
 
-  const vertProperties = new Float32Array(pos.count * 3)
-  for (let i = 0; i < pos.count; i++) {
-    vertProperties[i * 3] = pos.getX(i)
-    vertProperties[i * 3 + 1] = pos.getY(i)
-    vertProperties[i * 3 + 2] = pos.getZ(i)
-  }
-  const triVerts = new Uint32Array(idx.count)
-  for (let i = 0; i < idx.count; i++) triVerts[i] = idx.getX(i)
+    const vertProperties = new Float32Array(pos.count * 3)
+    for (let i = 0; i < pos.count; i++) {
+      vertProperties[i * 3] = pos.getX(i)
+      vertProperties[i * 3 + 1] = pos.getY(i)
+      vertProperties[i * 3 + 2] = pos.getZ(i)
+    }
+    const triVerts = new Uint32Array(idx.count)
+    for (let i = 0; i < idx.count; i++) triVerts[i] = idx.getX(i)
 
-  const mesh = new Mesh({
-    numProp: 3,
-    vertProperties,
-    triVerts,
-  })
-  mesh.merge()
-  try {
-    return new Manifold(mesh)
-  } catch (e) {
-    throw new Error(
-      `Mesh is not manifold (open/non-manifold edges). ${(e as Error).message || e}`,
-    )
+    const mesh = new Mesh({
+      numProp: 3,
+      vertProperties,
+      triVerts,
+    })
+    mesh.merge()
+    try {
+      return new Manifold(mesh)
+    } catch (e) {
+      lastErr = e
+    }
   }
+  throw new Error(
+    `Mesh is not manifold (open/non-manifold edges). ${(lastErr as Error)?.message || lastErr}`,
+  )
 }
 
 /** Convert a Manifold solid back to a Three BufferGeometry. */
@@ -126,10 +142,14 @@ export async function manifoldToGeom(
   geom.computeBoundingSphere()
   // Clear any leftover drawRange semantics
   geom.setDrawRange(0, Infinity)
+  geom.userData.manifoldClean = true
   return geom
 }
 
-function prepareForManifold(geom: THREE.BufferGeometry): THREE.BufferGeometry {
+function prepareForManifold(
+  geom: THREE.BufferGeometry,
+  weld: number | false = 1e-4,
+): THREE.BufferGeometry {
   // Materialize drawRange (three-bvh-csg leftover) into a real index buffer
   let g = materializeDrawRange(geom)
   // Drop non-position attrs so mergeVertices can weld freely
@@ -143,8 +163,11 @@ function prepareForManifold(geom: THREE.BufferGeometry): THREE.BufferGeometry {
     for (let i = 0; i < n; i++) index[i] = i
     g.setIndex(new THREE.BufferAttribute(index, 1))
   }
-  // Weld duplicates from STL / CSG T-vertices
-  g = mergeVertices(g, 1e-4)
+  // Weld duplicates from STL / CSG T-vertices. Skip on Manifold output —
+  // 1e-4 welding can collapse distinct verts and break 2-manifold edges.
+  if (weld !== false) {
+    g = mergeVertices(g, weld)
+  }
   // Remove zero-area triangles
   g = removeDegenerateTriangles(g)
   return g
@@ -247,14 +270,27 @@ export async function manifoldUnion(
   b: THREE.BufferGeometry,
 ): Promise<THREE.BufferGeometry> {
   const { Manifold } = await api()
-  const ma = await geomToManifold(a)
-  const mb = await geomToManifold(b)
-  const result = Manifold.union(ma, mb)
-  ma.delete()
-  mb.delete()
-  const geom = await manifoldToGeom(result)
-  result.delete()
-  return geom
+  try {
+    const ma = await geomToManifold(a)
+    const mb = await geomToManifold(b)
+    const result = Manifold.union(ma, mb)
+    ma.delete()
+    mb.delete()
+    const geom = await manifoldToGeom(result)
+    result.delete()
+    return geom
+  } catch {
+    const repairedA = await repairWithManifoldMerge(a)
+    const repairedB = await repairWithManifoldMerge(b)
+    const ma = await geomToManifold(repairedA ?? a)
+    const mb = await geomToManifold(repairedB ?? b)
+    const result = Manifold.union(ma, mb)
+    ma.delete()
+    mb.delete()
+    const geom = await manifoldToGeom(result)
+    result.delete()
+    return geom
+  }
 }
 
 export async function manifoldSubtract(
@@ -262,14 +298,27 @@ export async function manifoldSubtract(
   b: THREE.BufferGeometry,
 ): Promise<THREE.BufferGeometry> {
   const { Manifold } = await api()
-  const ma = await geomToManifold(a)
-  const mb = await geomToManifold(b)
-  const result = Manifold.difference(ma, mb)
-  ma.delete()
-  mb.delete()
-  const geom = await manifoldToGeom(result)
-  result.delete()
-  return geom
+  try {
+    const ma = await geomToManifold(a)
+    const mb = await geomToManifold(b)
+    const result = Manifold.difference(ma, mb)
+    ma.delete()
+    mb.delete()
+    const geom = await manifoldToGeom(result)
+    result.delete()
+    return geom
+  } catch {
+    const repairedA = await repairWithManifoldMerge(a)
+    const repairedB = await repairWithManifoldMerge(b)
+    const ma = await geomToManifold(repairedA ?? a)
+    const mb = await geomToManifold(repairedB ?? b)
+    const result = Manifold.difference(ma, mb)
+    ma.delete()
+    mb.delete()
+    const geom = await manifoldToGeom(result)
+    result.delete()
+    return geom
+  }
 }
 
 export async function manifoldIntersect(
@@ -277,14 +326,27 @@ export async function manifoldIntersect(
   b: THREE.BufferGeometry,
 ): Promise<THREE.BufferGeometry> {
   const { Manifold } = await api()
-  const ma = await geomToManifold(a)
-  const mb = await geomToManifold(b)
-  const result = Manifold.intersection(ma, mb)
-  ma.delete()
-  mb.delete()
-  const geom = await manifoldToGeom(result)
-  result.delete()
-  return geom
+  try {
+    const ma = await geomToManifold(a)
+    const mb = await geomToManifold(b)
+    const result = Manifold.intersection(ma, mb)
+    ma.delete()
+    mb.delete()
+    const geom = await manifoldToGeom(result)
+    result.delete()
+    return geom
+  } catch {
+    const repairedA = await repairWithManifoldMerge(a)
+    const repairedB = await repairWithManifoldMerge(b)
+    const ma = await geomToManifold(repairedA ?? a)
+    const mb = await geomToManifold(repairedB ?? b)
+    const result = Manifold.intersection(ma, mb)
+    ma.delete()
+    mb.delete()
+    const geom = await manifoldToGeom(result)
+    result.delete()
+    return geom
+  }
 }
 
 /** Axis-aligned box as a Manifold, then to Three geometry. */
@@ -317,6 +379,22 @@ export async function ensureManifoldSolid(
   const out = await manifoldToGeom(solid)
   solid.delete()
   return out
+}
+
+/**
+ * Guarantee a 2-manifold solid for CSG when possible.
+ * Does not voxel-remesh (too slow / lossy); callers must fall back.
+ */
+export async function ensureBooleanSolid(
+  geom: THREE.BufferGeometry,
+): Promise<THREE.BufferGeometry> {
+  try {
+    return await ensureManifoldSolid(geom)
+  } catch {
+    const merged = await repairWithManifoldMerge(geom)
+    if (merged) return merged
+    throw new Error('Mesh is not manifold (open/non-manifold edges).')
+  }
 }
 
 /**

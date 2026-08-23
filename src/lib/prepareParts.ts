@@ -3,17 +3,30 @@ import {
   buildInsert,
   resolveInsertFloors,
   flipAxis,
+  axisLetter,
   type CutAxis,
   type InsertMeta,
 } from './extrude'
-import { splitAtHeight } from './split'
-import { subtractSolid, unionSolid } from './boolean'
+import {
+  splitAlongSpline,
+  splitAtHeight,
+  type SplitLockAxis,
+  type SplitMode,
+} from './split'
+import {
+  subtractSolid,
+  unionSolid,
+  intersectSolid,
+  mergeSolids,
+} from './boolean'
 import { scalePerpByClearance } from './clearance'
 import {
   ensureManifoldSolid,
+  ensureBooleanSolid,
   repairWithManifoldMerge,
   hullFromGeometry,
 } from './manifoldOps'
+import { sampleSplitPath, type SplitPathNode } from './splitBezier'
 import { listSelectionIslands } from './select'
 import {
   buildInsertFromLoop,
@@ -36,8 +49,8 @@ export interface PreparedParts {
   /** shrunk structural insert fused into the bottom (null if none / inserts-only) */
   structuralInsert: THREE.BufferGeometry | null
   /**
-   * Separate drop-in inserts (shrunk for fit). Each connected island is its
-   * own solid, using that island's cut axis + floor.
+   * Separate drop-in inserts (shrunk for fit). Empty in split mode — those
+   * solids are merged into `bottom` as extra shells. Used in inserts-only mode.
    */
   dropIns: THREE.BufferGeometry[]
   /** Cut axis used for each drop-in (parallel to dropIns). */
@@ -156,6 +169,12 @@ async function solidifyPenCutter(
   return geom.clone()
 }
 
+function geomTriCount(g: THREE.BufferGeometry): number {
+  return g.index
+    ? g.index.count / 3
+    : g.getAttribute('position').count / 3
+}
+
 async function buildFitInsertFromLoop(
   geom: THREE.BufferGeometry,
   loop: THREE.Vector3[],
@@ -163,6 +182,7 @@ async function buildFitInsertFromLoop(
   clearance: number,
   axis: CutAxis = '-z',
   entry?: number,
+  preferPrism = false,
 ): Promise<{
   cutter: THREE.BufferGeometry
   fit: THREE.BufferGeometry
@@ -171,9 +191,46 @@ async function buildFitInsertFromLoop(
   if (loop.length < 3) return null
 
   const resolved = resolveLoopInsertFloors(geom, loop, axis, floor, 0.75, entry)
-  const rawFit = buildInsertFromLoop(loop, resolved.axis, resolved.insertFloor)
-  if (!rawFit) return null
 
+  let fit: THREE.BufferGeometry | null = null
+  if (!preferPrism) {
+    const clipLoop = nudgeLoopIntoBody(loop, flipAxis(resolved.axis), 0.75)
+    const rawClip = buildInsertFromLoop(
+      clipLoop,
+      resolved.axis,
+      resolved.insertFloor,
+    )
+    if (rawClip) {
+      try {
+        const solidClip = await solidifyPenCutter(rawClip)
+        let solidModel: THREE.BufferGeometry
+        try {
+          solidModel = await ensureBooleanSolid(geom)
+        } catch {
+          solidModel = geom
+        }
+        const hit = await intersectSolid(solidModel, solidClip)
+        if (geomTriCount(hit) >= 1) {
+          fit = (await trySolidify(hit)) ?? hit
+        }
+      } catch (err) {
+        console.warn(
+          'Pen clip intersection failed; falling back to prism insert',
+          err,
+        )
+      }
+    }
+  }
+
+  // Prism: explicit flatten, or fallback when intersection is empty
+  if (!fit) {
+    const rawFit = buildInsertFromLoop(loop, resolved.axis, resolved.insertFloor)
+    if (!rawFit) return null
+    const solidFit = await trySolidify(rawFit)
+    fit = solidFit ?? rawFit.clone()
+  }
+
+  // Pocket cutter stays a clean prism for a tidy drop-in hole
   const pocketLoop = nudgeLoopIntoBody(loop, resolved.axis)
   const pocketFloor = deeperFloorAlongAxis(resolved.cutterFloor, resolved.axis)
 
@@ -197,19 +254,17 @@ async function buildFitInsertFromLoop(
     }
   }
 
-  const solidFit = await trySolidify(rawFit)
-  let fit = solidFit ?? rawFit.clone()
   if (clearance > 0) {
-    if (solidFit) {
-      const shrunk = await trySolidify(
-        scalePerpByClearance(fit, -clearance, resolved.axis),
-      )
-      if (shrunk) fit = shrunk
+    const shrunk = await trySolidify(
+      scalePerpByClearance(fit, -clearance, resolved.axis),
+    )
+    if (shrunk) {
+      fit = shrunk
     } else {
       try {
         fit = scalePerpByClearance(fit, -clearance, resolved.axis)
       } catch {
-        /* keep unshrunk raw */
+        /* keep unshrunk */
       }
     }
   }
@@ -258,6 +313,11 @@ export interface PreparePartsOptions {
    * Structural faces are ignored (caller should fold them into dropIn).
    */
   insertsOnly?: boolean
+  /** 0–1 prepare progress (split / remesh / inserts). */
+  onProgress?: (pct: number) => void
+  splitMode?: SplitMode
+  splitLockAxis?: SplitLockAxis
+  splitSpline?: SplitPathNode[]
 }
 
 /**
@@ -266,7 +326,8 @@ export interface PreparePartsOptions {
  * Split mode (default):
  * - Split seam: lower ends at H - c/2, upper starts at H + c/2
  * - Structural faces → column fused into bottom (−Z to bed); hole in upper
- * - Drop-in islands → separate inserts, each with its own cut axis + floor
+ * - −Z drop-in islands → included in the bottom STL (separate shells, one file); hole in upper
+ * - Lateral (X/Y) drop-ins are ignored in split mode
  *
  * Inserts-only mode:
  * - No split. Full body with holes for inserts + separate insert STLs.
@@ -282,6 +343,9 @@ export async function prepareParts(
 ): Promise<PreparedParts> {
   const opts: PreparePartsOptions =
     typeof options === 'number' ? { dropInFloorZ: options } : options
+
+  const report = (pct: number) => opts.onProgress?.(Math.max(0, Math.min(1, pct)))
+  report(0.02)
 
   const c = Math.max(0, clearance)
   const insertsOnly = !!opts.insertsOnly
@@ -322,6 +386,33 @@ export async function prepareParts(
     const triCount = (g: THREE.BufferGeometry) =>
       g.index ? g.index.count / 3 : g.getAttribute('position').count / 3
 
+    const splitMode = upper != null
+    const insertWork = islands.length + (opts.penCutouts?.length ?? 0)
+    const tickInsert = (done: number) => {
+      if (insertWork > 0) {
+        report((splitMode ? 0.55 : 0.28) + (done / insertWork) * 0.4)
+      }
+    }
+    // Reach through the split kerf so −Z inserts union into the chassis.
+    const fuseFloor = (floor: number, axis: CutAxis) =>
+      splitMode && axis === '-z' ? Math.min(floor, H - c / 2 - 0.35) : floor
+
+    async function fuseToBottom(
+      fit: THREE.BufferGeometry,
+      cutter: THREE.BufferGeometry,
+      label: string,
+    ): Promise<void> {
+      // One STL with multiple shells — no boolean (keeps each insert as its own part).
+      lower = mergeSolids(lower, fit)
+      if (upper) {
+        try {
+          upper = await subtractSolid(upper, cutter)
+        } catch (err) {
+          console.warn(`${label}: upper cut failed`, err)
+        }
+      }
+    }
+
     for (let i = 0; i < islands.length; i++) {
       const island = islands[i]!
       const { axis, floor, entry } = metaForIsland(
@@ -329,9 +420,14 @@ export async function prepareParts(
         opts.dropInMeta,
         fallback,
       )
+      if (splitMode && axisLetter(axis) !== 'z') {
+        tickInsert(i + 1)
+        continue
+      }
+      const insertFloor = fuseFloor(floor, axis)
       let built: Awaited<ReturnType<typeof buildFitInsert>> = null
       try {
-        built = await buildFitInsert(geom, island, floor, c, axis, entry)
+        built = await buildFitInsert(geom, island, insertFloor, c, axis, entry)
       } catch (err) {
         console.warn(
           `Insert island ${i} (${axis} @ ${floor}) solidify failed`,
@@ -340,6 +436,12 @@ export async function prepareParts(
         continue
       }
       if (!built) continue
+
+      if (splitMode && axisLetter(built.axis) === 'z') {
+        await fuseToBottom(built.fit, built.cutter, `Insert island ${i}`)
+        tickInsert(i + 1)
+        continue
+      }
 
       // Always keep the insert even if the pocket cut fails — otherwise
       // lateral (−X/+X) inserts can vanish from ZIP export while the UI
@@ -376,6 +478,7 @@ export async function prepareParts(
         dropIns.push(built.fit)
         dropInAxes.push(built.axis)
       }
+      tickInsert(i + 1)
     }
 
     const pens = opts.penCutouts ?? []
@@ -383,14 +486,33 @@ export async function prepareParts(
       const cutout = pens[pi]!
       const { axis, floor, entry } = cutout.meta
       const loop = loopToVectors(cutout.loop)
+      if (splitMode && axisLetter(axis) !== 'z') {
+        tickInsert(islands.length + pi + 1)
+        continue
+      }
+      const insertFloor = fuseFloor(floor, axis)
       let built: Awaited<ReturnType<typeof buildFitInsertFromLoop>> = null
       try {
-        built = await buildFitInsertFromLoop(geom, loop, floor, c, axis, entry)
+        built = await buildFitInsertFromLoop(
+          geom,
+          loop,
+          insertFloor,
+          c,
+          axis,
+          entry,
+          cutout.flat === true,
+        )
       } catch (err) {
         console.warn(`Pen cutout ${pi} solidify failed`, err)
         continue
       }
       if (!built) continue
+
+      if (splitMode && axisLetter(built.axis) === 'z') {
+        await fuseToBottom(built.fit, built.cutter, `Pen cutout ${pi}`)
+        continue
+      }
+
       try {
         let cutter = built.cutter
         let nextLower: THREE.BufferGeometry
@@ -427,14 +549,23 @@ export async function prepareParts(
         dropIns.push(built.fit)
         dropInAxes.push(built.axis)
       }
+      tickInsert(islands.length + pi + 1)
     }
 
     return { lower, upper, dropIns, dropInAxes }
   }
 
   if (insertsOnly) {
-    const body = await ensureManifoldSolid(geom)
+    report(0.1)
+    let body: THREE.BufferGeometry
+    try {
+      body = await ensureBooleanSolid(geom)
+    } catch {
+      body = geom
+    }
+    report(0.28)
     const { lower, dropIns, dropInAxes } = await cutDropIns(body, null)
+    report(1)
     return {
       bottom: lower,
       upper: null,
@@ -445,7 +576,20 @@ export async function prepareParts(
     }
   }
 
-  let { lower, upper } = await splitAtHeight(geom, H, c)
+  report(0.08)
+  const splinePts = sampleSplitPath(opts.splitSpline ?? [])
+  const useSpline =
+    opts.splitMode === 'spline' && splinePts.length >= 2
+  let { lower, upper } = useSpline
+    ? await splitAlongSpline(
+        geom,
+        opts.splitLockAxis ?? 'y',
+        splinePts,
+        c,
+        (p) => report(0.08 + p * 0.42),
+      )
+    : await splitAtHeight(geom, H, c, (p) => report(0.08 + p * 0.42))
+  report(0.52)
 
   let structuralInsert: THREE.BufferGeometry | null = null
 
@@ -458,8 +602,10 @@ export async function prepareParts(
       upper = await subtractSolid(upper, built.cutter)
     }
   }
+  report(0.55)
 
   const cut = await cutDropIns(lower, upper)
+  report(1)
 
   return {
     bottom: cut.lower,

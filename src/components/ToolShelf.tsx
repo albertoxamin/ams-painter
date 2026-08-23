@@ -1,5 +1,6 @@
 import { useStore } from '../state'
 import { PAINT_TOOL_REGISTRY } from '../features/painter/tools/registry'
+import { requestFinishSplitLine, requestResumeSplitLine } from '../features/painter/viewport/SplitDrawPlane'
 
 function BrushIcon() {
   return (
@@ -53,6 +54,19 @@ function BoxIcon() {
   )
 }
 
+function SplitLineIcon() {
+  return (
+    <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>
+      <path
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        d="M3 14c2-6 5-8 7-4s4 7 7-2"
+      />
+    </svg>
+  )
+}
+
 function UndoIcon() {
   return (
     <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>
@@ -84,6 +98,7 @@ export default function ToolShelf() {
   const paintTarget = useStore((s) => s.paintTarget)
   const setPaintTarget = useStore((s) => s.setPaintTarget)
   const insertsOnly = useStore((s) => s.insertsOnly)
+  const setSplitMode = useStore((s) => s.setSplitMode)
   const brushRadiusVal = useStore((s) => s.brushRadius)
   const setBrushRadius = useStore((s) => s.setBrushRadius)
   const floodAngleDeg = useStore((s) => s.floodAngleDeg)
@@ -99,6 +114,9 @@ export default function ToolShelf() {
   const preview = useStore((s) => s.preview)
   const setPreview = useStore((s) => s.setPreview)
   const busy = useStore((s) => s.busy)
+  const splitDrawFace = useStore((s) => s.splitDrawFace)
+  const setSplitDrawFace = useStore((s) => s.setSplitDrawFace)
+  const splitLockAxis = useStore((s) => s.splitLockAxis)
 
   const paintTools = ['brush', 'pen', 'flood', 'box'] as const
 
@@ -109,9 +127,13 @@ export default function ToolShelf() {
           <button
             key={tool}
             type="button"
-            className={`tool-icon${paintTool === tool ? ' active' : ''}`}
-            title={`${PAINT_TOOL_REGISTRY[tool].label} (${PAINT_TOOL_REGISTRY[tool].shortcut})`}
-            disabled={!model}
+            className={`tool-icon${paintTool === tool && !preview ? ' active' : ''}`}
+            title={
+              preview
+                ? 'Turn Preview off to paint'
+                : `${PAINT_TOOL_REGISTRY[tool].label} (${PAINT_TOOL_REGISTRY[tool].shortcut})`
+            }
+            disabled={!model || preview}
             onClick={() => setPaintTool(tool)}
           >
             {tool === 'brush' && <BrushIcon />}
@@ -120,6 +142,25 @@ export default function ToolShelf() {
             {tool === 'box' && <BoxIcon />}
           </button>
         ))}
+        {!insertsOnly && (
+          <button
+            type="button"
+            className={`tool-icon${paintTool === 'splitLine' && !preview ? ' active' : ''}`}
+            title={
+              preview
+                ? 'Turn Preview off to paint'
+                : `${PAINT_TOOL_REGISTRY.splitLine.label} (${PAINT_TOOL_REGISTRY.splitLine.shortcut})`
+            }
+            disabled={!model || preview}
+            onClick={() => {
+              setSplitMode('spline')
+              if (paintTool === 'splitLine') requestResumeSplitLine()
+              setPaintTool('splitLine')
+            }}
+          >
+            <SplitLineIcon />
+          </button>
+        )}
         <div className="tool-shelf-divider" />
         <button
           type="button"
@@ -143,6 +184,15 @@ export default function ToolShelf() {
 
       {model && (
         <div className="tool-shelf-settings">
+          {preview ? (
+            <>
+              <div className="tool-shelf-heading">Preview</div>
+              <p className="tool-shelf-hint">
+                View-only exploded result · turn Preview off to paint
+              </p>
+            </>
+          ) : (
+            <>
           <div className="tool-shelf-heading">
             {PAINT_TOOL_REGISTRY[paintTool].label}
           </div>
@@ -227,8 +277,48 @@ export default function ToolShelf() {
 
           {(paintTool === 'pen' ||
             paintTool === 'flood' ||
-            paintTool === 'box') && (
+            paintTool === 'box' ||
+            paintTool === 'splitLine') && (
             <p className="tool-shelf-hint">{PAINT_TOOL_REGISTRY[paintTool].hint}</p>
+          )}
+
+          {paintTool === 'splitLine' && (
+            <>
+              <div className="bpy-prop-row">
+                <span className="bpy-prop-label">Draw on</span>
+              </div>
+              <div className="split-face-pad" role="group" aria-label="Split draw plane">
+                {(
+                  [
+                    ['top', 'Top'],
+                    ['front', 'Front'],
+                    ['left', 'Left'],
+                    ['right', 'Right'],
+                    ['back', 'Back'],
+                    ['bottom', 'Bottom'],
+                  ] as const
+                ).map(([face, label]) => (
+                  <button
+                    key={face}
+                    type="button"
+                    className={`split-face-pad-btn ${face}${splitDrawFace === face ? ' active' : ''}`}
+                    onClick={() => setSplitDrawFace(face)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <p className="tool-shelf-hint">
+                Lock {splitLockAxis.toUpperCase()} · camera cube does not change this
+              </p>
+              <button
+                type="button"
+                className="block primary"
+                onClick={() => requestFinishSplitLine()}
+              >
+                Finish line (Enter)
+              </button>
+            </>
           )}
 
           <div className="bpy-prop-row bpy-prop-buttons">
@@ -252,6 +342,8 @@ export default function ToolShelf() {
               ))}
             </div>
           </div>
+            </>
+          )}
 
           <button
             type="button"

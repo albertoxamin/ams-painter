@@ -7,6 +7,7 @@ export default defineConfig({
   plugins: [react()],
   optimizeDeps: {
     exclude: ['manifold-3d'],
+    include: ['three-bvh-csg'],
   },
   assetsInclude: ['**/*.wasm'],
 })

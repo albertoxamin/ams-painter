@@ -28,7 +28,7 @@ export const PAINT_TOOL_REGISTRY: Record<PaintTool, PaintToolDefinition> = {
     id: 'pen',
     label: 'Pen',
     shortcut: 'P',
-    hint: 'Click points on the model · Enter to finish · Backspace undo point · Esc cancel',
+    hint: 'Draw a closed outline · insert keeps the mesh inside it (along the cut axis) · Enter to finish · Backspace undo · Esc cancel',
     usesBrushRadius: false,
     usesPaintTarget: false,
   },
@@ -48,12 +48,20 @@ export const PAINT_TOOL_REGISTRY: Record<PaintTool, PaintToolDefinition> = {
     usesBrushRadius: false,
     usesPaintTarget: true,
   },
+  splitLine: {
+    id: 'splitLine',
+    label: 'Split line',
+    shortcut: 'N',
+    hint: 'Click = corner · click-drag = curve · Enter/double-click to finish · then drag points & handles · Alt-drag handle breaks pair · double-click point converts · click curve to add · Alt-click deletes · Backspace undo · Esc clear',
+    usesBrushRadius: false,
+    usesPaintTarget: false,
+  },
 }
 
 export const PAINT_TOOL_LIST = Object.values(PAINT_TOOL_REGISTRY)
 
 export const SHORTCUT_HELP = [
-  { keys: 'B / P / G / C', desc: 'Brush, Pen, Flood, Box tools' },
+  { keys: 'B / P / G / C / N', desc: 'Brush, Pen, Flood, Box, Split line' },
   { keys: '1–4', desc: 'Palette colors' },
   { keys: 'X Y Z', desc: 'Toggle cut axis / sign' },
   { keys: '[ ]', desc: 'Brush radius' },
@@ -74,7 +82,8 @@ export function paintToolHint(
   },
 ): string {
   const def = PAINT_TOOL_REGISTRY[tool]
-  if (tool === 'pen' || tool === 'flood' || tool === 'box') return def.hint
+  if (tool === 'pen' || tool === 'flood' || tool === 'box' || tool === 'splitLine')
+    return def.hint
   if (ctx.mode === 'remove') {
     return 'Drag to erase painted areas · Hold Shift while dragging'
   }

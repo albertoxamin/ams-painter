@@ -4,6 +4,97 @@ import { colorSlug } from '../domain/palette'
 import { downloadBlob } from '../platform/io/downloadBlob'
 import type { SelectionSnapshot } from './selectionSnapshot'
 import { materializeDrawRange } from './manifoldOps'
+import { buildAdjacency, listSelectionIslands } from './select'
+import { repairExportMesh } from './meshTopology'
+
+export type StlExportOptions = {
+  /** Drop shells that do not touch the lowest Z (slicer "floating regions"). */
+  dropFloating?: boolean
+}
+
+/** Translate so min Z is 0 without shifting XY (keeps bottom/upper aligned). */
+export function sitOnBed(geom: THREE.BufferGeometry): THREE.BufferGeometry {
+  const g = materializeDrawRange(geom)
+  g.computeBoundingBox()
+  const z = g.boundingBox?.min.z ?? 0
+  if (Math.abs(z) > 1e-8) g.translate(0, 0, -z)
+  g.computeBoundingBox()
+  g.computeBoundingSphere()
+  return g
+}
+
+/**
+ * Keep only triangle islands whose lowest vertex is on the part's min Z.
+ * Removes leftover chips from insert cuts that otherwise float in the slicer.
+ */
+export function discardFloatingRegions(
+  geom: THREE.BufferGeometry,
+  slop = 0.35,
+): THREE.BufferGeometry {
+  const src = materializeDrawRange(geom)
+  const soup = src.index ? src.toNonIndexed() : src
+  const pos = soup.getAttribute('position') as THREE.BufferAttribute
+  if (!pos || pos.count < 3) return soup
+
+  soup.computeBoundingBox()
+  const bedZ = soup.boundingBox!.min.z
+  const triCount = pos.count / 3
+  const all = new Set<number>()
+  for (let t = 0; t < triCount; t++) all.add(t)
+  const islands = listSelectionIslands(all, buildAdjacency(soup))
+
+  const areas = islands.map((island) => {
+    let area = 0
+    const a = new THREE.Vector3()
+    const b = new THREE.Vector3()
+    const c = new THREE.Vector3()
+    for (const t of island) {
+      const i = t * 3
+      a.set(pos.getX(i), pos.getY(i), pos.getZ(i))
+      b.set(pos.getX(i + 1), pos.getY(i + 1), pos.getZ(i + 1))
+      c.set(pos.getX(i + 2), pos.getY(i + 2), pos.getZ(i + 2))
+      area += 0.5 * b.sub(a).cross(c.sub(a)).length()
+    }
+    return area
+  })
+  const totalArea = areas.reduce((s, a) => s + a, 0)
+
+  const keep = new Set<number>()
+  islands.forEach((island, i) => {
+    let zmin = Infinity
+    for (const t of island) {
+      const a = t * 3
+      zmin = Math.min(zmin, pos.getZ(a), pos.getZ(a + 1), pos.getZ(a + 2))
+    }
+    const big = totalArea > 0 && areas[i]! >= totalArea * 0.05
+    if (zmin <= bedZ + slop || big) {
+      for (const t of island) keep.add(t)
+    }
+  })
+  if (keep.size === 0 || keep.size === triCount) return soup
+
+  const coords: number[] = []
+  for (const t of keep) {
+    const a = t * 3
+    for (let i = 0; i < 3; i++) {
+      coords.push(pos.getX(a + i), pos.getY(a + i), pos.getZ(a + i))
+    }
+  }
+  const out = new THREE.BufferGeometry()
+  out.setAttribute('position', new THREE.Float32BufferAttribute(coords, 3))
+  out.computeVertexNormals()
+  out.computeBoundingBox()
+  out.computeBoundingSphere()
+  return out
+}
+
+function prepareForPrint(
+  geom: THREE.BufferGeometry,
+  opts?: StlExportOptions,
+): THREE.BufferGeometry {
+  const cleaned = opts?.dropFloating ? discardFloatingRegions(geom) : geom
+  return sitOnBed(repairExportMesh(cleaned))
+}
 
 /** STLExporter binary mode returns a DataView, not an ArrayBuffer. */
 function toBinarySTLBytes(root: THREE.Object3D): Uint8Array {
@@ -44,14 +135,20 @@ function toBinarySTLBlob(root: THREE.Object3D): Blob {
   return new Blob([ab], { type: 'application/octet-stream' })
 }
 
-export function geometryToSTLBuffer(geom: THREE.BufferGeometry): Uint8Array {
-  const clean = materializeDrawRange(geom)
+export function geometryToSTLBuffer(
+  geom: THREE.BufferGeometry,
+  opts?: StlExportOptions,
+): Uint8Array {
+  const clean = prepareForPrint(geom, opts)
   return toBinarySTLBytes(new THREE.Mesh(clean))
 }
 
-export function downloadSTL(geom: THREE.BufferGeometry, filename: string): void {
-  // Materialize drawRange so STLExporter (which ignores it) doesn't write junk
-  const clean = materializeDrawRange(geom)
+export function downloadSTL(
+  geom: THREE.BufferGeometry,
+  filename: string,
+  opts?: StlExportOptions,
+): void {
+  const clean = prepareForPrint(geom, opts)
   downloadBlob(toBinarySTLBlob(new THREE.Mesh(clean)), filename)
 }
 
@@ -224,7 +321,7 @@ export function downloadAllPartsZip(input: {
   if (input.upper) {
     files.push({
       name: `${base}_upper.stl`,
-      data: geometryToSTLBuffer(input.upper),
+      data: geometryToSTLBuffer(input.upper, { dropFloating: true }),
     })
   }
 

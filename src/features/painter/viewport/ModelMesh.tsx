@@ -32,6 +32,7 @@ import { InsertEspOutline } from './overlays/InsertEspOutline'
 import { PenCursorRing } from './overlays/PenCursorRing'
 import { PenEspOutline } from './overlays/PenEspOutline'
 import { PenLoopOverlay } from './overlays/PenLoopOverlay'
+import { PenLoopEditor } from './overlays/PenLoopEditor'
 import { SelectionOverlay } from './overlays/SelectionOverlay'
 import { SplitCutOutline } from './overlays/SplitCutOutline'
 import { useInteraction } from '../interaction/InteractionContext'
@@ -48,6 +49,7 @@ export function ModelMesh() {
   const mode = useStore((s) => s.mode)
   const brushRadius = useStore((s) => s.brushRadius)
   const splitHeight = useStore((s) => s.splitHeight)
+  const splitMode = useStore((s) => s.splitMode)
   const preview = useStore((s) => s.preview)
   const esp = useStore((s) => s.esp)
   const activeIsland = useStore((s) => s.activeIsland)
@@ -61,6 +63,7 @@ export function ModelMesh() {
   const setActivePenIndex = useStore((s) => s.setActivePenIndex)
   const applyAxisToPenCutout = useStore((s) => s.applyAxisToPenCutout)
   const applyDepthsToPenCutout = useStore((s) => s.applyDepthsToPenCutout)
+  const setPenCutoutLoop = useStore((s) => s.setPenCutoutLoop)
   const setBusy = useStore((s) => s.setBusy)
   const setError = useStore((s) => s.setError)
   const beginStroke = useStore((s) => s.beginStroke)
@@ -68,7 +71,6 @@ export function ModelMesh() {
   const floodPaintAt = useStore((s) => s.floodPaintAt)
   const selectLinkedAt = useStore((s) => s.selectLinkedAt)
   const busy = useStore((s) => s.busy)
-  const error = useStore((s) => s.error)
   const { setIsPainting: setGlobalPainting } = useInteraction()
   const meshRef = useRef<THREE.Mesh>(null)
   const painting = useRef(false)
@@ -126,7 +128,7 @@ export function ModelMesh() {
           : -1
 
   const gizmoPenIdx =
-    isPainting || paintTool !== 'pen'
+    isPainting || paintTool !== 'pen' || penDraft.length > 0
       ? -1
       : activePenIndex >= 0 && activePenIndex < penCutouts.length
         ? activePenIndex
@@ -145,9 +147,11 @@ export function ModelMesh() {
   }
 
   useEffect(() => {
-    if (paintTool !== 'pen') {
-      setPenDraft([])
-      setPenCursor(null)
+    if (paintTool !== 'pen' || preview) {
+      if (paintTool !== 'pen') {
+        setPenDraft([])
+        setPenCursor(null)
+      }
       return
     }
     const onKey = (e: KeyboardEvent) => {
@@ -185,9 +189,10 @@ export function ModelMesh() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [paintTool, penDraft.length, addPenCutout, hoverIdx, selectLinkedAt])
+  }, [paintTool, preview, penDraft.length, addPenCutout, hoverIdx, selectLinkedAt])
 
   useEffect(() => {
+    if (preview) return
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null
       if (
@@ -206,7 +211,7 @@ export function ModelMesh() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [hoverIdx, selectLinkedAt])
+  }, [preview, hoverIdx, selectLinkedAt])
 
   const paintAt = (e: ThreeEvent<PointerEvent>) => {
     if (!model || !meshRef.current) return
@@ -253,7 +258,7 @@ export function ModelMesh() {
   }, [controls])
 
   const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
-    if (!model || busy || e.button !== 0) return
+    if (!model || busy || preview || e.button !== 0) return
     if (
       isDepthHandleDragging() ||
       pointerNearDepthHandle(
@@ -287,6 +292,10 @@ export function ModelMesh() {
       setPenDraft((d) => [...d, hit.point.clone()])
       setActiveIsland(-1)
       setActivePenIndex(-1)
+      return
+    }
+
+    if (paintTool === 'splitLine') {
       return
     }
 
@@ -327,7 +336,15 @@ export function ModelMesh() {
   }
 
   const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
-    if (!model || !meshRef.current || busy || isDepthHandleDragging()) return
+    if (
+      !model ||
+      !meshRef.current ||
+      busy ||
+      preview ||
+      isDepthHandleDragging()
+    ) {
+      return
+    }
 
     if (paintTool === 'pen' && !painting.current) {
       if (gizmoHit.current || anyHitIsGizmo(e)) return
@@ -360,6 +377,12 @@ export function ModelMesh() {
       /* ignore */
     }
 
+    if (preview) {
+      downPoint.current = null
+      endPaint()
+      return
+    }
+
     // Short click on a drop-in face selects that island (gizmo / panel sync)
     if (
       painting.current &&
@@ -382,31 +405,32 @@ export function ModelMesh() {
   }
 
   const onPointerOut = () => {
+    if (preview) return
     if (!painting.current) setHoverIdx(null)
   }
 
   if (!model) return null
 
-  // Keep the painted source visible until preview parts are ready, and whenever
-  // preview CSG fails — otherwise a failed prepare leaves an empty viewport.
-  const showSource = !preview || busy || !!error
+  // Preview explode replaces the source. Do not keep a ghost copy — opacity 0
+  // still draws the original mesh in the middle of the split.
+  const showSource = !preview
   const diag = modelDiagonal(model.geometry)
   const penActive = paintTool === 'pen'
-  // Invisible pick shell while preview hides the source mesh (Three.js skips raycasts on visible=false).
-  const meshGhost = !showSource
 
   return (
     <group>
       <mesh
         ref={meshRef}
         geometry={model.geometry}
-        visible={showSource || meshGhost}
+        visible={showSource}
+        // Hidden meshes still raycast by default — block picks in preview.
+        raycast={showSource ? undefined : () => {}}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerOut={onPointerOut}
-        castShadow={!meshGhost}
-        receiveShadow={!meshGhost}
+        castShadow={showSource}
+        receiveShadow={showSource}
       >
         <meshStandardMaterial
           color={'#b8c0d0'}
@@ -414,13 +438,10 @@ export function ModelMesh() {
           roughness={0.75}
           flatShading
           side={THREE.FrontSide}
-          transparent={meshGhost}
-          opacity={meshGhost ? 0 : 1}
-          depthWrite={!meshGhost}
         />
       </mesh>
 
-      {(showSource || meshGhost) && (
+      {showSource && (
         <>
           <HoverOutline
             geom={model.geometry}
@@ -474,12 +495,12 @@ export function ModelMesh() {
                 />
               )
             })}
-          {!insertsOnly && (
+          {!insertsOnly && splitMode === 'height' && (
             <SplitCutOutline geom={model.geometry} height={splitHeight} />
           )}
         </>
       )}
-      {gizmoIslandIdx >= 0 && dropInIslands[gizmoIslandIdx] && (
+      {showSource && gizmoIslandIdx >= 0 && dropInIslands[gizmoIslandIdx] && (
         <>
           <AxisGizmo
             center={islandCentroid(
@@ -532,18 +553,60 @@ export function ModelMesh() {
           />
         </>
       )}
-      {penCutouts.map((cutout) => {
-        const col = paletteColor(palette, cutout.meta.colorId)
-        return (
-          <PenLoopOverlay
-            key={cutout.id}
-            loop={loopToVectors(cutout.loop)}
-            color={col.hex}
-            closed
-          />
-        )
-      })}
-      {(penDraft.length > 0 || penCursor) && (
+      {showSource &&
+        penCutouts.map((cutout, i) => {
+          const col = paletteColor(palette, cutout.meta.colorId)
+          const pts = loopToVectors(cutout.loop)
+          if (gizmoPenIdx === i) {
+            return (
+              <group key={cutout.id}>
+                <PenLoopOverlay loop={pts} color={col.hex} closed />
+                <PenLoopEditor
+                  loop={pts}
+                  axis={cutout.meta.axis}
+                  color={col.hex}
+                  size={diag * 0.07}
+                  onHover={(v) => {
+                    gizmoHit.current = v
+                  }}
+                  onDragStart={() => {
+                    if (painting.current) endPaint()
+                    gizmoHit.current = true
+                    beginStroke()
+                    setActivePenIndex(i)
+                    if (controls && 'enabled' in controls) {
+                      ;(controls as { enabled: boolean }).enabled = false
+                    }
+                  }}
+                  onDragEnd={() => {
+                    gizmoHit.current = false
+                    if (controls && 'enabled' in controls) {
+                      ;(controls as { enabled: boolean }).enabled = true
+                    }
+                  }}
+                  onChange={(next) => {
+                    setPenCutoutLoop(
+                      cutout.id,
+                      next.map(
+                        (p) =>
+                          [p.x, p.y, p.z] as [number, number, number],
+                      ),
+                    )
+                  }}
+                />
+              </group>
+            )
+          }
+          return (
+            <PenLoopOverlay
+              key={cutout.id}
+              loop={pts}
+              color={col.hex}
+              closed
+            />
+          )
+        })}
+      {showSource && (penDraft.length > 0 || penCursor) && (
         <PenLoopOverlay
           loop={penDraft}
           cursor={penCursor}
@@ -551,7 +614,7 @@ export function ModelMesh() {
           closed={false}
         />
       )}
-      {penActive && penCursor && (
+      {showSource && penActive && penCursor && (
         <PenCursorRing
           geom={model.geometry}
           point={penCursor}
@@ -560,7 +623,8 @@ export function ModelMesh() {
           size={diag * 0.012}
         />
       )}
-      {esp &&
+      {showSource &&
+        esp &&
         penCutouts.map((cutout) => {
           const col = paletteColor(palette, cutout.meta.colorId)
           return (
@@ -573,7 +637,7 @@ export function ModelMesh() {
             />
           )
         })}
-      {gizmoPenIdx >= 0 && penCutouts[gizmoPenIdx] && (
+      {showSource && gizmoPenIdx >= 0 && penCutouts[gizmoPenIdx] && (
         <>
           <AxisGizmo
             center={penCutoutCentroid(

@@ -29,6 +29,9 @@ export function SplitPreview({
   const explode = useStore((s) => s.explode)
   const clearance = useStore((s) => s.clearance)
   const insertsOnly = useStore((s) => s.insertsOnly)
+  const splitMode = useStore((s) => s.splitMode)
+  const splitLockAxis = useStore((s) => s.splitLockAxis)
+  const splitSpline = useStore((s) => s.splitSpline)
   const penCutouts = useStore((s) => s.penCutouts)
   const { isPainting } = useInteraction()
 
@@ -44,6 +47,9 @@ export function SplitPreview({
       dropInFloorZ,
       insertsOnly,
       cutAxis,
+      splitMode,
+      splitLockAxis,
+      splitSpline,
     },
     preview,
     setError,
@@ -66,7 +72,7 @@ export function SplitPreview({
 
   return (
     <group>
-      {!insertsOnly && explode < 0.05 && (
+      {!insertsOnly && splitMode === 'height' && explode < 0.05 && (
         <>
           <mesh position={[0, 0, splitHeight]} raycast={() => {}}>
             <planeGeometry args={[planeW, planeH]} />
@@ -100,13 +106,11 @@ export function SplitPreview({
           </mesh>
           {parts.upper && (
             <mesh geometry={parts.upper} position={[0, 0, gap]} raycast={() => {}}>
-              <meshStandardMaterial
-                color={COLORS.upper}
-                flatShading
-                side={THREE.DoubleSide}
-                transparent
-                opacity={0.7}
-              />
+            <meshStandardMaterial
+              color={COLORS.upper}
+              flatShading
+              side={THREE.DoubleSide}
+            />
             </mesh>
           )}
           {parts.dropIns.map((g, i) => {

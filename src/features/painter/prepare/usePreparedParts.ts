@@ -7,6 +7,7 @@ import {
   type PreparePartsInput,
 } from './buildPrepareInput'
 import { loadPreparedWithWorker } from './prepareWorkerClient'
+import { useStore } from '../../../state'
 
 export interface PreparedPartsView {
   lower: THREE.BufferGeometry
@@ -44,12 +45,16 @@ export function invalidatePreparedPartsCache(): void {
   cacheOrder.length = 0
 }
 
-async function loadPrepared(input: PreparePartsInput): Promise<PreparedPartsView> {
-  return loadPreparedWithWorker(input)
+async function loadPrepared(
+  input: PreparePartsInput,
+  onProgress?: (pct: number) => void,
+): Promise<PreparedPartsView> {
+  return loadPreparedWithWorker(input, onProgress)
 }
 
 export function getPreparedPartsCached(
   input: PreparePartsInput,
+  onProgress?: (pct: number) => void,
 ): Promise<PreparedPartsView> {
   const key = prepareInputCacheKey(input)
   const hit = cache.get(key)
@@ -57,7 +62,7 @@ export function getPreparedPartsCached(
     touchCacheKey(key)
     return hit.promise
   }
-  const promise = loadPrepared(input).then((parts) => {
+  const promise = loadPrepared(input, onProgress).then((parts) => {
     const entry = cache.get(key)
     if (entry) entry.parts = parts
     return parts
@@ -100,6 +105,7 @@ export function usePreparedParts(
     const run = () => {
       onBusy?.(true)
       onError?.(null)
+      useStore.getState().setBusyProgress(0)
 
       const cached = cache.get(key)
       if (cached?.parts) {
@@ -108,7 +114,11 @@ export function usePreparedParts(
         return
       }
 
-      getPreparedPartsCached(input)
+      getPreparedPartsCached(input, (pct) => {
+        if (!cancelled && keyRef.current === key) {
+          useStore.getState().setBusyProgress(pct)
+        }
+      })
         .then((result) => {
           if (!cancelled && keyRef.current === key) setParts(result)
         })
@@ -141,5 +151,7 @@ export async function awaitPreparedParts(
 ) {
   const input = buildPreparePartsInput(storeSlice)
   if (!input) return null
-  return getPreparedPartsCached(input)
+  return getPreparedPartsCached(input, (pct) => {
+    useStore.getState().setBusyProgress(pct)
+  })
 }

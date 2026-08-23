@@ -26,6 +26,12 @@ export default function SidePanel() {
   const model = useStore((s) => s.model)
   const splitHeight = useStore((s) => s.splitHeight)
   const setSplitHeight = useStore((s) => s.setSplitHeight)
+  const splitMode = useStore((s) => s.splitMode)
+  const setSplitMode = useStore((s) => s.setSplitMode)
+  const splitLockAxis = useStore((s) => s.splitLockAxis)
+  const setSplitLockAxis = useStore((s) => s.setSplitLockAxis)
+  const splitSpline = useStore((s) => s.splitSpline)
+  const setSplitSpline = useStore((s) => s.setSplitSpline)
   const structural = useStore((s) => s.structural)
   const dropIn = useStore((s) => s.dropIn)
   const dropInMeta = useStore((s) => s.dropInMeta)
@@ -66,7 +72,11 @@ export default function SidePanel() {
   const penCutouts = useStore((s) => s.penCutouts)
   const activePenIndex = useStore((s) => s.activePenIndex)
   const setActivePenIndex = useStore((s) => s.setActivePenIndex)
+  const selectPenCutout = useStore((s) => s.selectPenCutout)
   const removePenCutout = useStore((s) => s.removePenCutout)
+  const flattenPenCutout = useStore((s) => s.flattenPenCutout)
+  const applyColorToPenCutout = useStore((s) => s.applyColorToPenCutout)
+  const removeDropInFaces = useStore((s) => s.removeDropInFaces)
 
   const dropInIslands = useMemo(
     () => (model ? listSelectionIslands(dropIn, model.adjacency) : []),
@@ -152,23 +162,37 @@ export default function SidePanel() {
       }
 
       if (key === 'b') {
+        if (useStore.getState().preview) return
         e.preventDefault()
         setPaintTool('brush')
         return
       }
       if (key === 'p') {
+        if (useStore.getState().preview) return
         e.preventDefault()
         setPaintTool('pen')
         return
       }
       if (key === 'g') {
+        if (useStore.getState().preview) return
         e.preventDefault()
         setPaintTool('flood')
         return
       }
       if (key === 'c') {
+        if (useStore.getState().preview) return
         e.preventDefault()
         setPaintTool('box')
+        return
+      }
+      if (key === 'n') {
+        if (useStore.getState().preview) return
+        e.preventDefault()
+        const s = useStore.getState()
+        if (!s.insertsOnly) {
+          s.setSplitMode('spline')
+          setPaintTool('splitLine')
+        }
       }
     }
     window.addEventListener('keydown', onKey)
@@ -240,6 +264,9 @@ export default function SidePanel() {
         model,
         insertsOnly,
         splitHeight,
+        splitMode,
+        splitLockAxis,
+        splitSpline,
         cutAxis,
         dropInFloorZ,
         brushColorId,
@@ -272,6 +299,9 @@ export default function SidePanel() {
       model,
       insertsOnly,
       splitHeight,
+      splitMode,
+      splitLockAxis,
+      splitSpline,
       cutAxis,
       dropInFloorZ,
       brushColorId,
@@ -291,6 +321,9 @@ export default function SidePanel() {
       model,
       insertsOnly,
       splitHeight,
+      splitMode,
+      splitLockAxis,
+      splitSpline,
       cutAxis,
       dropInFloorZ,
       brushColorId,
@@ -336,6 +369,9 @@ export default function SidePanel() {
       dropInFloorZ,
       insertsOnly,
       cutAxis,
+      splitMode,
+      splitLockAxis,
+      splitSpline,
     })
     if (!prepared) return null
     return {
@@ -364,7 +400,7 @@ export default function SidePanel() {
           setError('No upper part in inserts-only mode')
           return
         }
-        downloadSTL(parts.upper, `${base}_upper.stl`)
+        downloadSTL(parts.upper, `${base}_upper.stl`, { dropFloating: true })
       } else {
         if (parts.dropIns.length === 0) {
           setError('No inserts marked yet')
@@ -486,27 +522,41 @@ export default function SidePanel() {
               const active = activeIsland === i
               return (
                 <li key={`b-${i}`}>
-                  <button
-                    type="button"
-                    className={`feature-row${active ? ' active' : ''}`}
-                    onClick={() => {
-                      setActiveIsland(active ? -1 : i)
-                      setActivePenIndex(-1)
-                      if (!active) {
-                        setCutAxis(m.axis)
-                        setDropInFloorZ(m.floor)
-                        setBrushColor(m.colorId)
-                      }
-                    }}
-                  >
-                    <span className="feature-chip" style={{ background: col.hex }} />
-                    <span className="feature-body">
-                      <strong>{col.name}</strong>
-                      <span>
-                        Brush · {m.axis} · {m.floor.toFixed(1)} mm
+                  <div className={`feature-row-wrap${active ? ' active' : ''}`}>
+                    <button
+                      type="button"
+                      className={`feature-row${active ? ' active' : ''}`}
+                      onClick={() => {
+                        setActiveIsland(active ? -1 : i)
+                        setActivePenIndex(-1)
+                        if (!active) {
+                          setCutAxis(m.axis)
+                          setDropInFloorZ(m.floor)
+                          setBrushColor(m.colorId)
+                        }
+                      }}
+                    >
+                      <span className="feature-chip" style={{ background: col.hex }} />
+                      <span className="feature-body">
+                        <strong>{col.name}</strong>
+                        <span>
+                          Brush · {m.axis} · {m.floor.toFixed(1)} mm
+                        </span>
                       </span>
-                    </span>
-                  </button>
+                    </button>
+                    <button
+                      type="button"
+                      className="feature-delete"
+                      title="Delete insert"
+                      aria-label="Delete insert"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        removeDropInFaces(island)
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
                 </li>
               )
             })}
@@ -515,27 +565,43 @@ export default function SidePanel() {
               const active = activePenIndex === i
               return (
                 <li key={cutout.id}>
+                  <div className={`feature-row-wrap${active ? ' active' : ''}`}>
+                    <button
+                      type="button"
+                      className={`feature-row${active ? ' active' : ''}`}
+                      onClick={() => {
+                        if (active) setActivePenIndex(-1)
+                        else selectPenCutout(i)
+                      }}
+                    >
+                      <span className="feature-chip" style={{ background: col.hex }} />
+                      <span className="feature-body">
+                        <strong>{col.name}</strong>
+                        <span>
+                          Pen · {cutout.loop.length} pts · {cutout.meta.axis}
+                          {cutout.flat ? ' · flat' : ''}
+                        </span>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="feature-delete"
+                      title="Delete insert"
+                      aria-label="Delete insert"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        removePenCutout(cutout.id)
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
                   <button
                     type="button"
-                    className={`feature-row${active ? ' active' : ''}`}
-                    onClick={() => {
-                      setActivePenIndex(active ? -1 : i)
-                      setActiveIsland(-1)
-                      if (!active) {
-                        setPaintTool('pen')
-                        setCutAxis(cutout.meta.axis)
-                        setDropInFloorZ(cutout.meta.floor)
-                        setBrushColor(cutout.meta.colorId)
-                      }
-                    }}
+                    className="block feature-flat"
+                    onClick={() => flattenPenCutout(cutout.id)}
                   >
-                    <span className="feature-chip" style={{ background: col.hex }} />
-                    <span className="feature-body">
-                      <strong>{col.name}</strong>
-                      <span>
-                        Pen · {cutout.loop.length} pts · {cutout.meta.axis}
-                      </span>
-                    </span>
+                    Make it flat
                   </button>
                 </li>
               )
@@ -544,27 +610,54 @@ export default function SidePanel() {
         )}
 
         {activeIsland >= 0 && activeIsland < dropInIslands.length && (
-          <button
-            type="button"
-            className="block subtle"
-            onClick={() =>
-              applyBrushToIslands([dropInIslands[activeIsland]!])
-            }
-          >
-            Apply color to selection
-          </button>
+          <div className="insert-props">
+            <div className="bpy-prop-row bpy-prop-colors">
+              <span className="bpy-prop-label">Color</span>
+              <div className="tool-swatches">
+                {palette.slice(0, 6).map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    className={`swatch${brushColorId === c.id ? ' active' : ''}`}
+                    title={c.name}
+                    style={{ background: c.hex }}
+                    onClick={() => {
+                      setBrushColor(c.id)
+                      applyBrushToIslands([dropInIslands[activeIsland]!])
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
         )}
         {activePenIndex >= 0 && activePenIndex < penCutouts.length && (
-          <button
-            type="button"
-            className="block danger subtle"
-            onClick={() => {
-              const c = penCutouts[activePenIndex]
-              if (c) removePenCutout(c.id)
-            }}
-          >
-            Delete pen cutout
-          </button>
+          <div className="insert-props">
+            <div className="bpy-prop-row bpy-prop-colors">
+              <span className="bpy-prop-label">Color</span>
+              <div className="tool-swatches">
+                {palette.slice(0, 6).map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    className={`swatch${
+                      penCutouts[activePenIndex]!.meta.colorId === c.id
+                        ? ' active'
+                        : ''
+                    }`}
+                    title={c.name}
+                    style={{ background: c.hex }}
+                    onClick={() =>
+                      applyColorToPenCutout(penCutouts[activePenIndex]!.id, c.id)
+                    }
+                  />
+                ))}
+              </div>
+            </div>
+            <p className="hint-line">
+              Drag points · click an edge to add · Alt-click a point to delete
+            </p>
+          </div>
         )}
 
         {hasMarks && (
@@ -625,19 +718,45 @@ export default function SidePanel() {
               Upper shell
             </button>
           )}
-          <button
-            className="primary"
-            onClick={() => doExport('dropIns')}
-            disabled={!model || busy || insertCount === 0}
-          >
-            Insert pieces (.zip)
-          </button>
+          {insertsOnly && (
+            <button
+              className="primary"
+              onClick={() => doExport('dropIns')}
+              disabled={!model || busy || insertCount === 0}
+            >
+              Insert pieces (.zip)
+            </button>
+          )}
         </div>
         {error && <p className="error-text">{error}</p>}
       </CollapsibleSection>
 
       <CollapsibleSection title="Advanced" defaultOpen={false}>
         {model && !insertsOnly && (
+          <>
+            <div className="bpy-prop-row">
+              <span className="bpy-prop-label">Split method</span>
+              <div className="bpy-prop-buttons">
+                <button
+                  type="button"
+                  className={splitMode === 'height' ? 'active' : ''}
+                  onClick={() => setSplitMode('height')}
+                >
+                  Height
+                </button>
+                <button
+                  type="button"
+                  className={splitMode === 'spline' ? 'active' : ''}
+                  onClick={() => {
+                    setSplitMode('spline')
+                    setPaintTool('splitLine')
+                  }}
+                >
+                  Spline
+                </button>
+              </div>
+            </div>
+            {splitMode === 'height' && (
           <label className="field">
             <span>Split height (Z)</span>
             <div className="field-row">
@@ -661,6 +780,40 @@ export default function SidePanel() {
               />
             </div>
           </label>
+            )}
+            {splitMode === 'spline' && (
+              <>
+                <div className="bpy-prop-row">
+                  <span className="bpy-prop-label">Lock axis</span>
+                  <div className="bpy-prop-buttons">
+                    {(['x', 'y', 'z'] as const).map((a) => (
+                      <button
+                        key={a}
+                        type="button"
+                        className={splitLockAxis === a ? 'active' : ''}
+                        onClick={() => setSplitLockAxis(a)}
+                      >
+                        {a.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <p className="tool-shelf-hint">
+                  {splitSpline.length} point{splitSpline.length === 1 ? '' : 's'}
+                  {splitSpline.some((p) => p.in || p.out) ? ' · Bézier' : ''} ·
+                  draw-plane faces are in the tool shelf
+                </p>
+                <button
+                  type="button"
+                  className="block subtle"
+                  disabled={splitSpline.length === 0}
+                  onClick={() => setSplitSpline([])}
+                >
+                  Clear split line
+                </button>
+              </>
+            )}
+          </>
         )}
 
         <label className="field">

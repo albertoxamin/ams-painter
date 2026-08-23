@@ -537,13 +537,53 @@ button.subtle:hover:not(:disabled) {
   border-radius: 2px;
 }
 
-.feature-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.feature-list > li {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+.feature-flat {
+  margin: 0 0 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.feature-row-wrap {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+}
+.feature-row-wrap .feature-row {
+  flex: 1;
+  min-width: 0;
+}
+.feature-row-wrap.active .feature-row {
+  border-color: var(--bpy-select);
+  background: var(--bpy-select-bg);
+}
+.feature-delete {
+  flex-shrink: 0;
+  width: 28px;
+  padding: 0;
+  margin: 0;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--bpy-text-muted);
+  background: var(--bpy-bg-dark);
+  border: 1px solid var(--bpy-border);
+  border-radius: 2px;
+}
+.feature-delete:hover {
+  color: var(--bpy-danger);
+  border-color: var(--bpy-danger);
+  background: rgba(224, 80, 80, 0.12);
+}
+.insert-props {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--bpy-border);
 }
 .feature-row {
   width: 100%;
@@ -662,6 +702,34 @@ button.subtle:hover:not(:disabled) {
 .status-bar-center.status-error {
   color: var(--bpy-danger);
 }
+.status-busy {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+.status-progress {
+  display: inline-block;
+  width: 88px;
+  height: 5px;
+  flex-shrink: 0;
+  border-radius: 2px;
+  background: var(--bpy-border-light);
+  overflow: hidden;
+}
+.status-progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--bpy-accent);
+  border-radius: 2px;
+  transition: width 0.15s ease-out;
+}
+.status-progress-pct {
+  font-variant-numeric: tabular-nums;
+  color: var(--bpy-text-dim);
+  min-width: 2.4em;
+  text-align: left;
+}
 .status-color-chip {
   width: 10px;
   height: 10px;
@@ -757,6 +825,68 @@ button.subtle:hover:not(:disabled) {
 }
 
 /* ── Floating viewport controls (repair/wheels) ── */
+.view-cube {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 6;
+  display: none;
+}
+.scene-view-cube {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 6;
+  width: 108px;
+  height: 108px;
+  pointer-events: auto;
+  border-radius: 4px;
+  overflow: hidden;
+  background: rgba(24, 24, 24, 0.35);
+}
+.scene-view-cube canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
+.painter-proj-toggle {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 6;
+  display: flex;
+  gap: 4px;
+  pointer-events: auto;
+}
+.split-face-pad {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+  grid-template-rows: 26px 26px 26px;
+  gap: 3px;
+  margin: 0 8px 8px;
+}
+.split-face-pad-btn {
+  margin: 0;
+  padding: 0;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--bpy-text);
+  background: var(--bpy-panel-2);
+  border: 1px solid var(--bpy-border-light);
+  border-radius: 2px;
+}
+.split-face-pad-btn:hover,
+.split-face-pad-btn.active {
+  background: var(--bpy-accent-bg);
+  border-color: var(--bpy-accent);
+  color: var(--bpy-accent);
+}
+.split-face-pad-btn.top { grid-column: 2; grid-row: 1; }
+.split-face-pad-btn.left { grid-column: 1; grid-row: 2; }
+.split-face-pad-btn.front { grid-column: 2; grid-row: 2; }
+.split-face-pad-btn.right { grid-column: 3; grid-row: 2; }
+.split-face-pad-btn.back { grid-column: 4; grid-row: 2; }
+.split-face-pad-btn.bottom { grid-column: 2; grid-row: 3; }
 .viewport-toolbar {
   position: absolute;
   top: 8px;

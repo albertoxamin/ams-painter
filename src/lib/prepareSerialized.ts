@@ -1,6 +1,8 @@
 import * as THREE from 'three'
 import type { InsertMeta, PenCutout } from '../domain'
 import type { CutAxis } from './extrude'
+import type { SplitLockAxis, SplitMode } from './split'
+import type { SplitPathNode } from './splitBezier'
 import { prepareParts } from './prepareParts'
 import { unpackGeometry, packGeometry, type PackedGeometry } from './geometryTransfer'
 
@@ -18,6 +20,9 @@ export interface SerializedPrepareInput {
   insertsOnly: boolean
   cutAxis: CutAxis
   adjacency: number[][]
+  splitMode?: SplitMode
+  splitLockAxis?: SplitLockAxis
+  splitSpline?: SplitPathNode[]
 }
 
 export interface SerializedPrepareOutput {
@@ -30,6 +35,7 @@ export interface SerializedPrepareOutput {
 
 export async function runPrepareSerialized(
   input: SerializedPrepareInput,
+  onProgress?: (pct: number) => void,
 ): Promise<SerializedPrepareOutput> {
   const geometry = unpackGeometry(input.geometry)
   const structural = new Set(input.structural)
@@ -53,6 +59,10 @@ export async function runPrepareSerialized(
       dropInMeta,
       adjacency: input.adjacency,
       penCutouts: input.penCutouts,
+      onProgress,
+      splitMode: input.splitMode,
+      splitLockAxis: input.splitLockAxis,
+      splitSpline: input.splitSpline,
     },
   )
 

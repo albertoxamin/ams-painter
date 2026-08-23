@@ -13,6 +13,7 @@ export default function PainterStatusBar({
   const insertsOnly = useStore((s) => s.insertsOnly)
   const preview = useStore((s) => s.preview)
   const busy = useStore((s) => s.busy)
+  const busyProgress = useStore((s) => s.busyProgress)
   const error = useStore((s) => s.error)
   const cutAxis = useStore((s) => s.cutAxis)
   const brushRadius = useStore((s) => s.brushRadius)
@@ -21,14 +22,16 @@ export default function PainterStatusBar({
     useStore((s) => s.brushColorId),
   )
 
-  const hint = model
-    ? paintToolHint(paintTool, {
-        mode,
-        paintTarget,
-        insertsOnly,
-        colorName: activeColor.name,
-      })
-    : 'Load an STL to begin · Drop file on viewport'
+  const hint = !model
+    ? 'Load an STL to begin · Drop file on viewport'
+    : preview
+      ? 'Preview is view-only · Turn Preview off to paint or select'
+      : paintToolHint(paintTool, {
+          mode,
+          paintTarget,
+          insertsOnly,
+          colorName: activeColor.name,
+        })
 
   return (
     <footer className="status-bar">
@@ -60,7 +63,32 @@ export default function PainterStatusBar({
         role="button"
         tabIndex={0}
       >
-        {busy ? 'Preparing…' : error ?? hint}
+        {busy ? (
+          <span className="status-busy">
+            Preparing…
+            {busyProgress != null && (
+              <>
+                <span
+                  className="status-progress"
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(busyProgress * 100)}
+                >
+                  <span
+                    className="status-progress-fill"
+                    style={{ width: `${Math.round(busyProgress * 100)}%` }}
+                  />
+                </span>
+                <span className="status-progress-pct">
+                  {Math.round(busyProgress * 100)}%
+                </span>
+              </>
+            )}
+          </span>
+        ) : (
+          (error ?? hint)
+        )}
       </div>
 
       <div className="status-bar-right">

@@ -1,9 +1,13 @@
 import type { CutAxis, InsertMeta, PaletteColor } from './extrude'
 import type { PenCutout } from './penCutout'
 import type { Model } from '../domain/model'
+import { serializeNode, parseSplitPathNode, type SplitPathNode } from './splitBezier'
+import type { SplitLockAxis, SplitMode } from './split'
 
-export const SELECTION_SNAPSHOT_VERSION = 2
+export const SELECTION_SNAPSHOT_VERSION = 3
 export const MESH_TRI_WARN = 500_000
+
+export type SplitSplinePoint = SplitPathNode
 
 export interface SelectionSnapshot {
   version: number
@@ -15,6 +19,9 @@ export interface SelectionSnapshot {
   meshHash?: string
   insertsOnly: boolean
   splitHeight: number
+  splitMode?: SplitMode
+  splitLockAxis?: SplitLockAxis
+  splitSpline?: SplitSplinePoint[]
   cutAxis: CutAxis
   dropInFloorZ: number
   brushColorId: string
@@ -27,6 +34,7 @@ export interface SelectionSnapshot {
     id: string
     loop: [number, number, number][]
     meta: InsertMeta
+    flat?: boolean
   }>
 }
 
@@ -34,6 +42,9 @@ export function buildSelectionSnapshot(input: {
   model: Model
   insertsOnly: boolean
   splitHeight: number
+  splitMode?: SplitMode
+  splitLockAxis?: SplitLockAxis
+  splitSpline?: SplitSplinePoint[]
   cutAxis: CutAxis
   dropInFloorZ: number
   brushColorId: string
@@ -54,6 +65,8 @@ export function buildSelectionSnapshot(input: {
     }
   }
 
+  const spline = (input.splitSpline ?? []).map(serializeNode)
+
   return {
     version: SELECTION_SNAPSHOT_VERSION,
     name: input.model.name,
@@ -61,6 +74,9 @@ export function buildSelectionSnapshot(input: {
     meshHash: input.model.meshHash,
     insertsOnly: input.insertsOnly,
     splitHeight: input.splitHeight,
+    splitMode: input.splitMode ?? 'height',
+    splitLockAxis: input.splitLockAxis ?? 'y',
+    splitSpline: spline,
     cutAxis: input.cutAxis,
     dropInFloorZ: input.dropInFloorZ,
     brushColorId: input.brushColorId,
@@ -78,6 +94,7 @@ export function buildSelectionSnapshot(input: {
         colorId: c.meta.colorId,
         ...(c.meta.entry !== undefined ? { entry: c.meta.entry } : {}),
       },
+      ...(c.flat ? { flat: true as const } : {}),
     })),
   }
 }
@@ -110,6 +127,18 @@ export function parseSelectionSnapshot(raw: unknown): SelectionSnapshot {
     ? (o.penCutouts as SelectionSnapshot['penCutouts'])
     : []
 
+  const splitMode: SplitMode =
+    o.splitMode === 'spline' ? 'spline' : 'height'
+  const splitLockAxis: SplitLockAxis =
+    o.splitLockAxis === 'x' || o.splitLockAxis === 'z' ? o.splitLockAxis : 'y'
+  const splitSpline: SplitSplinePoint[] = []
+  if (Array.isArray(o.splitSpline)) {
+    for (const p of o.splitSpline) {
+      const node = parseSplitPathNode(p)
+      if (node) splitSpline.push(node)
+    }
+  }
+
   return {
     version:
       typeof o.version === 'number' ? o.version : SELECTION_SNAPSHOT_VERSION,
@@ -118,6 +147,9 @@ export function parseSelectionSnapshot(raw: unknown): SelectionSnapshot {
     meshHash: typeof o.meshHash === 'string' ? o.meshHash : undefined,
     insertsOnly: o.insertsOnly === true,
     splitHeight: typeof o.splitHeight === 'number' ? o.splitHeight : 0,
+    splitMode,
+    splitLockAxis,
+    splitSpline,
     cutAxis: (o.cutAxis as CutAxis) ?? '-z',
     dropInFloorZ: typeof o.dropInFloorZ === 'number' ? o.dropInFloorZ : 0,
     brushColorId:

@@ -1,12 +1,15 @@
 import { create } from 'zustand'
+import * as THREE from 'three'
 import { axisBounds,
   type CutAxis,
   type InsertMeta,
   type PaletteColor,
 } from './lib/extrude'
-import { type PenCutout, newPenCutoutId } from './lib/penCutout'
+import { type PenCutout, newPenCutoutId, flattenPenLoopToMeshExtreme } from './lib/penCutout'
 import { floodSelect, meshIslandFrom } from './lib/select'
 import type { Model } from './domain/model'
+import type { SplitLockAxis, SplitMode } from './lib/split'
+import { cloneNode, type SplitPathNode } from './lib/splitBezier'
 import {
   DEFAULT_PALETTE,
   resolveIslandMeta,
@@ -15,10 +18,14 @@ import {
 } from './domain/palette'
 
 export type SelectionMode = 'add' | 'remove'
-export type PaintTool = 'brush' | 'pen' | 'flood' | 'box'
+export type PaintTool = 'brush' | 'pen' | 'flood' | 'box' | 'splitLine'
+export type CameraProjection = 'perspective' | 'isometric'
+export type ViewFace = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right'
+export type SplitSplinePoint = SplitPathNode
 /** Where painted faces go: fused into bottom, or separate drop-in inserts. */
 export type PaintTarget = 'structural' | 'dropIn'
 export type { CutAxis, InsertMeta, PaletteColor, PenCutout, Model }
+export type { SplitLockAxis, SplitMode } from './lib/split'
 export { DEFAULT_PALETTE, resolveIslandMeta, paletteColor, colorSlug }
 
 interface SelSnap {
@@ -33,6 +40,14 @@ const MAX_UNDO = 50
 interface State {
   model: Model | null
   splitHeight: number
+  splitMode: SplitMode
+  splitLockAxis: SplitLockAxis
+  /** Drawing-plane face for the split-line tool (independent of the view cube). */
+  splitDrawFace: ViewFace
+  splitSpline: SplitSplinePoint[]
+  cameraProjection: CameraProjection
+  viewFace: ViewFace | null
+  viewTick: number
   /** Faces fused into the bottom chassis (posts, ribs, mounts). */
   structural: Set<number>
   /** Faces that become separate inserts dropped in from above. */
@@ -83,10 +98,18 @@ interface State {
   floodAngleDeg: number
   /** working flag for CSG ops */
   busy: boolean
+  /** 0–1 while busy, otherwise null */
+  busyProgress: number | null
   error: string | null
 
   setModel: (m: Model | null) => void
   setSplitHeight: (h: number) => void
+  setSplitMode: (m: SplitMode) => void
+  setSplitLockAxis: (a: SplitLockAxis) => void
+  setSplitDrawFace: (face: ViewFace) => void
+  setSplitSpline: (pts: SplitSplinePoint[]) => void
+  setCameraProjection: (p: CameraProjection) => void
+  snapViewFace: (face: ViewFace) => void
   setMode: (m: SelectionMode) => void
   setPaintTool: (t: PaintTool) => void
   setPaintTarget: (t: PaintTarget) => void
@@ -105,9 +128,14 @@ interface State {
   setInsertsOnly: (v: boolean) => void
   setActiveIsland: (i: number) => void
   setActivePenIndex: (i: number) => void
+  selectPenCutout: (i: number) => void
   /** Commit a closed pen loop as a new insert cutout. */
   addPenCutout: (loop: [number, number, number][]) => void
   removePenCutout: (id: string) => void
+  flattenPenCutout: (id: string) => void
+  setPenCutoutLoop: (id: string, loop: [number, number, number][]) => void
+  applyColorToPenCutout: (id: string, colorId: string) => void
+  removeDropInFaces: (faces: Set<number>) => void
   applyAxisToPenCutout: (id: string, axis: CutAxis) => void
   applyDepthsToPenCutout: (
     id: string,
@@ -126,6 +154,7 @@ interface State {
   setEsp: (v: boolean) => void
   setExplode: (e: number) => void
   setBusy: (b: boolean) => void
+  setBusyProgress: (p: number) => void
   setError: (e: string | null) => void
   /** Restore selections without clearing (e.g. after hot reload). */
   restoreSelections: (
@@ -148,6 +177,9 @@ interface State {
     dropInFloorZ?: number
     insertsOnly?: boolean
     splitHeight?: number
+    splitMode?: 'height' | 'spline'
+    splitLockAxis?: 'x' | 'y' | 'z'
+    splitSpline?: SplitSplinePoint[]
     clearance?: number
   }) => void
   /** Push current selections onto the undo stack (call once per stroke). */
@@ -187,6 +219,7 @@ function clonePenCutouts(list: PenCutout[]): PenCutout[] {
     id: c.id,
     loop: c.loop.map((p) => [...p] as [number, number, number]),
     meta: { ...c.meta, ...(c.meta.entry !== undefined ? { entry: c.meta.entry } : {}) },
+    ...(c.flat ? { flat: true as const } : {}),
   }))
 }
 
@@ -236,6 +269,13 @@ function newColorId(): string {
 export const useStore = create<State>((set, get) => ({
   model: null,
   splitHeight: 0,
+  splitMode: 'height',
+  splitLockAxis: 'y',
+  splitDrawFace: 'front',
+  splitSpline: [],
+  cameraProjection: 'perspective',
+  viewFace: null,
+  viewTick: 0,
   structural: new Set<number>(),
   dropIn: new Set<number>(),
   dropInMeta: new Map(),
@@ -259,6 +299,7 @@ export const useStore = create<State>((set, get) => ({
   explode: 0.45,
   floodAngleDeg: 18,
   busy: false,
+  busyProgress: null,
   error: null,
 
   setModel: (m) => {
@@ -279,6 +320,12 @@ export const useStore = create<State>((set, get) => ({
       activeIsland: -1,
       activePenIndex: -1,
       splitHeight: split,
+      splitMode: 'height',
+      splitLockAxis: 'y',
+      splitDrawFace: 'front',
+      splitSpline: [],
+      cameraProjection: 'perspective',
+      viewFace: null,
       dropInFloorZ: split,
       brushRadius: m
         ? Math.min(
@@ -301,13 +348,41 @@ export const useStore = create<State>((set, get) => ({
       const floor = followed ? h : Math.min(max, Math.max(min, s.dropInFloorZ))
       return { splitHeight: h, dropInFloorZ: floor }
     }),
+  setSplitMode: (m) =>
+    set((s) => ({
+      splitMode: m,
+      paintTool:
+        m === 'height' && s.paintTool === 'splitLine' ? 'brush' : s.paintTool,
+    })),
+  setSplitLockAxis: (a) =>
+    set({
+      splitLockAxis: a,
+      splitDrawFace: a === 'x' ? 'right' : a === 'y' ? 'front' : 'top',
+    }),
+  setSplitDrawFace: (face) =>
+    set({
+      splitDrawFace: face,
+      splitLockAxis:
+        face === 'top' || face === 'bottom'
+          ? 'z'
+          : face === 'front' || face === 'back'
+            ? 'y'
+            : 'x',
+    }),
+  setSplitSpline: (pts) => set({ splitSpline: pts.map(cloneNode) }),
+  setCameraProjection: (p) => set({ cameraProjection: p }),
+  snapViewFace: (face) =>
+    set({
+      viewFace: face,
+      viewTick: get().viewTick + 1,
+    }),
   setMode: (m) => set({ mode: m }),
   setPaintTool: (t) =>
-    set(() => ({
+    set((s) => ({
       paintTool: t,
-      activeIsland: -1,
-      activePenIndex: -1,
       ...(t === 'pen' ? { paintTarget: 'dropIn' as PaintTarget } : {}),
+      // Tool-shelf / shortcut: enter draw mode. Row click uses selectPenCutout.
+      ...(t === 'pen' || s.paintTool === 'pen' ? { activePenIndex: -1 } : {}),
     })),
   setPaintTarget: (t) => set({ paintTarget: t }),
   setBrushRadius: (r) => set({ brushRadius: Math.max(0.1, r) }),
@@ -394,10 +469,30 @@ export const useStore = create<State>((set, get) => ({
         structural: new Set<number>(),
         dropIn,
         dropInMeta,
+        paintTool: s.paintTool === 'splitLine' ? 'brush' : s.paintTool,
       }
     }),
   setActiveIsland: (i) => set({ activeIsland: i, activePenIndex: -1 }),
   setActivePenIndex: (i) => set({ activePenIndex: i, activeIsland: -1 }),
+  selectPenCutout: (i) =>
+    set((s) => {
+      if (i < 0) return { activePenIndex: -1 }
+      const c = s.penCutouts[i]
+      if (!c) return s
+      const { min, max } = s.model
+        ? axisBounds(s.model, c.meta.axis)
+        : { min: c.meta.floor, max: c.meta.floor }
+      const floor = Math.min(max, Math.max(min, c.meta.floor))
+      return {
+        activePenIndex: i,
+        activeIsland: -1,
+        paintTool: 'pen' as const,
+        paintTarget: 'dropIn' as PaintTarget,
+        cutAxis: c.meta.axis,
+        dropInFloorZ: floor,
+        brushColorId: c.meta.colorId,
+      }
+    }),
 
   addPenCutout: (loop) =>
     set((s) => {
@@ -430,6 +525,62 @@ export const useStore = create<State>((set, get) => ({
             : s.activePenIndex > idx
               ? s.activePenIndex - 1
               : s.activePenIndex,
+      }
+    }),
+
+  flattenPenCutout: (id) =>
+    set((s) => {
+      const penCutouts = clonePenCutouts(s.penCutouts)
+      const c = penCutouts.find((x) => x.id === id)
+      if (!c || c.loop.length < 3) return s
+      const loop = c.loop.map(([x, y, z]) => new THREE.Vector3(x, y, z))
+      const pts = flattenPenLoopToMeshExtreme(
+        s.model?.geometry ?? null,
+        loop,
+        c.meta.axis,
+      )
+      c.loop = pts.map((p) => [p.x, p.y, p.z] as [number, number, number])
+      c.flat = true
+      return { ...pushUndo(s), penCutouts }
+    }),
+
+  setPenCutoutLoop: (id, loop) =>
+    set((s) => {
+      if (loop.length < 3) return s
+      const penCutouts = clonePenCutouts(s.penCutouts)
+      const c = penCutouts.find((x) => x.id === id)
+      if (!c) return s
+      c.loop = loop.map((p) => [...p] as [number, number, number])
+      return { penCutouts }
+    }),
+
+  applyColorToPenCutout: (id, colorId) =>
+    set((s) => {
+      const penCutouts = clonePenCutouts(s.penCutouts)
+      const c = penCutouts.find((x) => x.id === id)
+      if (!c) return s
+      c.meta = { ...c.meta, colorId }
+      return { ...pushUndo(s), penCutouts, brushColorId: colorId }
+    }),
+
+  removeDropInFaces: (faces) =>
+    set((s) => {
+      if (faces.size === 0) return s
+      const dropIn = cloneSel(s.dropIn)
+      const dropInMeta = cloneMeta(s.dropInMeta)
+      let any = false
+      for (const f of faces) {
+        if (!dropIn.has(f)) continue
+        dropIn.delete(f)
+        dropInMeta.delete(f)
+        any = true
+      }
+      if (!any) return s
+      return {
+        ...pushUndo(s),
+        dropIn,
+        dropInMeta,
+        activeIsland: -1,
       }
     }),
 
@@ -561,7 +712,9 @@ export const useStore = create<State>((set, get) => ({
   setPreview: (p) => set({ preview: p }),
   setEsp: (v) => set({ esp: v }),
   setExplode: (e) => set({ explode: Math.min(1, Math.max(0, e)) }),
-  setBusy: (b) => set({ busy: b }),
+  setBusy: (b) => set(b ? { busy: true } : { busy: false, busyProgress: null }),
+  setBusyProgress: (p) =>
+    set({ busyProgress: Math.max(0, Math.min(1, p)) }),
   setError: (e) => set({ error: e }),
 
   restoreSelections: (structural, dropIn = [], meta) => {
@@ -615,6 +768,19 @@ export const useStore = create<State>((set, get) => ({
     if (typeof snap.splitHeight === 'number') {
       patch.splitHeight = snap.splitHeight
     }
+    if (snap.splitMode === 'height' || snap.splitMode === 'spline') {
+      patch.splitMode = snap.splitMode
+    }
+    if (
+      snap.splitLockAxis === 'x' ||
+      snap.splitLockAxis === 'y' ||
+      snap.splitLockAxis === 'z'
+    ) {
+      patch.splitLockAxis = snap.splitLockAxis
+    }
+    if (snap.splitSpline) {
+      patch.splitSpline = snap.splitSpline.map(cloneNode)
+    }
     if (typeof snap.clearance === 'number') {
       patch.clearance = snap.clearance
     }
@@ -628,6 +794,7 @@ export const useStore = create<State>((set, get) => ({
           colorId: c.meta.colorId,
           ...(c.meta.entry !== undefined ? { entry: c.meta.entry } : {}),
         },
+        ...(c.flat ? { flat: true as const } : {}),
       }))
     }
     if (
@@ -637,6 +804,9 @@ export const useStore = create<State>((set, get) => ({
       snap.dropInFloorZ != null ||
       snap.insertsOnly != null ||
       snap.splitHeight != null ||
+      snap.splitMode ||
+      snap.splitLockAxis ||
+      snap.splitSpline ||
       snap.clearance != null ||
       snap.penCutouts
     ) {

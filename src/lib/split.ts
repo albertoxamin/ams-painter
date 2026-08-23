@@ -1,41 +1,58 @@
 import * as THREE from 'three'
+import { clipToSide } from './clipAtHeight'
 import {
-  boxGeometry,
-  manifoldIntersect,
-} from './manifoldOps'
+  clipToSplineSide,
+  type SplitLockAxis,
+} from './clipAlongSpline'
+
+export type { SplitLockAxis }
+export type SplitMode = 'height' | 'spline'
 
 /**
- * Split a geometry at height H (model-local z) into lower and upper parts.
- * Uses Manifold CSG so results stay 2-manifold for slicers (Bambu, etc.).
+ * Split at height H.
  *
- * `clearance` (mm) opens a kerf at the seam: lower ends at H - clearance/2,
- * upper starts at H + clearance/2. Pass 0 for a flush cut.
+ * Both sides are plane-clipped and capped at the cut. Window holes in the
+ * original skin stay open (no cavity fill). Hollow CSG is avoided because it
+ * left non-manifold edges that Bambu Studio rejects.
  */
 export async function splitAtHeight(
   geom: THREE.BufferGeometry,
   H: number,
   clearance = 0,
+  onProgress?: (pct: number) => void,
 ): Promise<{ lower: THREE.BufferGeometry; upper: THREE.BufferGeometry }> {
-  geom.computeBoundingBox()
-  const box = geom.boundingBox!
-  const pad = 1.0
   const kerf = Math.max(0, clearance) / 2
+  const lowerH = H - kerf
+  const upperH = H + kerf
+  onProgress?.(0.2)
+  const lower = clipToSide(geom, lowerH, 'below')
+  onProgress?.(0.6)
+  const upper = clipToSide(geom, upperH, 'above', {
+    cap: true,
+    fillCavities: false,
+  })
+  onProgress?.(1)
+  return { lower, upper }
+}
 
-  const min = new THREE.Vector3(box.min.x - pad, box.min.y - pad, box.min.z - pad)
-  const max = new THREE.Vector3(box.max.x + pad, box.max.y + pad, box.max.z + pad)
-
-  const lowerBox = await boxGeometry(
-    new THREE.Vector3(min.x, min.y, min.z),
-    new THREE.Vector3(max.x, max.y, H - kerf),
-  )
-  const upperBox = await boxGeometry(
-    new THREE.Vector3(min.x, min.y, H + kerf),
-    new THREE.Vector3(max.x, max.y, max.z),
-  )
-
-  const lower = await manifoldIntersect(geom, lowerBox)
-  const upper = await manifoldIntersect(geom, upperBox)
-  lowerBox.dispose()
-  upperBox.dispose()
+export async function splitAlongSpline(
+  geom: THREE.BufferGeometry,
+  lock: SplitLockAxis,
+  spline: THREE.Vector3[],
+  clearance = 0,
+  onProgress?: (pct: number) => void,
+): Promise<{ lower: THREE.BufferGeometry; upper: THREE.BufferGeometry }> {
+  const kerf = Math.max(0, clearance) / 2
+  onProgress?.(0.2)
+  const lower = clipToSplineSide(geom, lock, spline, 'below', {
+    cap: true,
+    vOffset: -kerf,
+  })
+  onProgress?.(0.6)
+  const upper = clipToSplineSide(geom, lock, spline, 'above', {
+    cap: true,
+    vOffset: kerf,
+  })
+  onProgress?.(1)
   return { lower, upper }
 }

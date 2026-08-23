@@ -26,7 +26,8 @@ export function isGizmoObject(obj: THREE.Object3D | null | undefined): boolean {
   let o: THREE.Object3D | null | undefined = obj
   while (o) {
     const u = o.userData
-    if (u?.axisGizmo || u?.depthHandle) return true
+    if (u?.axisGizmo || u?.depthHandle || u?.penLoopEdit || u?.splitBezierEdit)
+      return true
     o = o.parent
   }
   return false

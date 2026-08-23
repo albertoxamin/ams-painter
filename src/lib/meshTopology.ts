@@ -370,3 +370,73 @@ export function analyzeTopology(mesh: IndexedMesh): MeshTopology {
     nonPlanarHoles,
   }
 }
+
+/**
+ * Weld coincident verts, drop zero-area / duplicate faces, and trim extra
+ * faces on edges used by more than two triangles. Keeps window holes (naked
+ * edges) but removes the non-manifold junctions slicers reject.
+ */
+export function repairExportMesh(geom: THREE.BufferGeometry): THREE.BufferGeometry {
+  const mesh = toIndexedMesh(geom)
+  const { pos, idx, triCount } = mesh
+  const firstOfHash = new Map<string, number>()
+  const keep = new Uint8Array(triCount)
+  keep.fill(1)
+
+  for (let t = 0; t < triCount; t++) {
+    const i0 = idx.getX(t * 3)
+    const i1 = idx.getX(t * 3 + 1)
+    const i2 = idx.getX(t * 3 + 2)
+    if (i0 === i1 || i1 === i2 || i0 === i2) {
+      keep[t] = 0
+      continue
+    }
+    const ax = pos.getX(i0)
+    const ay = pos.getY(i0)
+    const az = pos.getZ(i0)
+    const bx = pos.getX(i1)
+    const by = pos.getY(i1)
+    const bz = pos.getZ(i1)
+    const cx = pos.getX(i2)
+    const cy = pos.getY(i2)
+    const cz = pos.getZ(i2)
+    const nx = (by - ay) * (cz - az) - (bz - az) * (cy - ay)
+    const ny = (bz - az) * (cx - ax) - (bx - ax) * (cz - az)
+    const nz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    if (nx * nx + ny * ny + nz * nz < 1e-20) {
+      keep[t] = 0
+      continue
+    }
+    const hk = triKey(pos, i0, i1, i2)
+    if (firstOfHash.has(hk)) {
+      keep[t] = 0
+      continue
+    }
+    firstOfHash.set(hk, t)
+  }
+
+  const edges = buildEdges(mesh)
+  for (const info of edges.values()) {
+    if (info.faces.length <= 2) continue
+    const live = info.faces.filter((f) => keep[f.tri])
+    for (let i = 2; i < live.length; i++) keep[live[i]!.tri] = 0
+  }
+
+  const coords: number[] = []
+  for (let t = 0; t < triCount; t++) {
+    if (!keep[t]) continue
+    for (let c = 0; c < 3; c++) {
+      const i = idx.getX(t * 3 + c)
+      coords.push(pos.getX(i), pos.getY(i), pos.getZ(i))
+    }
+  }
+  if (coords.length < 9) return mesh.geometry
+
+  const out = new THREE.BufferGeometry()
+  out.setAttribute('position', new THREE.Float32BufferAttribute(coords, 3))
+  const welded = toIndexedMesh(out).geometry
+  welded.computeVertexNormals()
+  welded.computeBoundingBox()
+  welded.computeBoundingSphere()
+  return welded
+}

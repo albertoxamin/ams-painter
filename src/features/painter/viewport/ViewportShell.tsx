@@ -14,10 +14,16 @@ import { BoxSelectOverlay } from '../../../components/BoxSelectOverlay'
 import BoxSelectLayer from '../../../components/BoxSelectLayer'
 import { ViewportPickBridge } from './ViewportPickBridge'
 import { OrbitControlsConfig } from './OrbitControlsConfig'
+import { CameraProjectionController } from './CameraProjectionController'
+import { ViewCube } from './ViewCube'
+import { SplitDrawPlane } from './SplitDrawPlane'
 
 export default function Viewport() {
   const model = useStore((s) => s.model)
   const paintTool = useStore((s) => s.paintTool)
+  const preview = useStore((s) => s.preview)
+  const cameraProjection = useStore((s) => s.cameraProjection)
+  const setCameraProjection = useStore((s) => s.setCameraProjection)
   const setModel = useStore((s) => s.setModel)
   const setError = useStore((s) => s.setError)
 
@@ -53,7 +59,7 @@ export default function Viewport() {
   return (
     <InteractionProvider>
       <div
-        className={`viewport${paintTool === 'box' && model ? ' tool-box' : ''}`}
+        className={`viewport${!preview && (paintTool === 'box' || paintTool === 'splitLine') && model ? ' tool-box' : ''}`}
         {...bind()}
       >
         <Canvas
@@ -71,6 +77,7 @@ export default function Viewport() {
             scene.background = new THREE.Color('#1d1d1d')
           }}
         >
+          <CameraProjectionController />
           <ambientLight intensity={0.6} />
           <directionalLight
             position={[200, -150, 300]}
@@ -80,6 +87,7 @@ export default function Viewport() {
           <directionalLight position={[-150, 100, 200]} intensity={0.4} />
           <ZUpGrid />
           <ModelMesh />
+          <SplitDrawPlane />
           <CameraRig model={model} />
           <ViewportPickBridge />
           <OrbitControlsConfig />
@@ -92,6 +100,23 @@ export default function Viewport() {
 
         <BoxSelectLayer />
         <BoxSelectOverlay />
+        <div className="painter-proj-toggle">
+          <button
+            type="button"
+            className={`viewport-btn${cameraProjection === 'perspective' ? ' active' : ''}`}
+            onClick={() => setCameraProjection('perspective')}
+          >
+            Perspective
+          </button>
+          <button
+            type="button"
+            className={`viewport-btn${cameraProjection === 'isometric' ? ' active' : ''}`}
+            onClick={() => setCameraProjection('isometric')}
+          >
+            Isometric
+          </button>
+        </div>
+        <ViewCube />
 
         {!model && (
           <div className={`dropzone ${dropActive ? 'active' : ''}`}>

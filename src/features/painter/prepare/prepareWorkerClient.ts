@@ -10,7 +10,11 @@ let worker: Worker | null = null
 let nextId = 1
 const pending = new Map<
   number,
-  { resolve: (v: PreparedPartsView) => void; reject: (e: Error) => void }
+  {
+    resolve: (v: PreparedPartsView) => void
+    reject: (e: Error) => void
+    onProgress?: (pct: number) => void
+  }
 >()
 
 function getWorker(): Worker | null {
@@ -24,6 +28,10 @@ function getWorker(): Worker | null {
         const msg = e.data
         const entry = pending.get(msg.id)
         if (!entry) return
+        if ('progress' in msg) {
+          entry.onProgress?.(msg.progress)
+          return
+        }
         pending.delete(msg.id)
         if (!msg.ok) {
           entry.reject(new Error(msg.error))
@@ -90,16 +98,20 @@ function toSerialized(input: PreparePartsInput): SerializedPrepareInput {
     insertsOnly: input.insertsOnly,
     cutAxis: input.cutAxis,
     adjacency: input.model.adjacency,
+    splitMode: input.splitMode,
+    splitLockAxis: input.splitLockAxis,
+    splitSpline: input.splitSpline,
   }
 }
 
 export async function loadPreparedWithWorker(
   input: PreparePartsInput,
+  onProgress?: (pct: number) => void,
 ): Promise<PreparedPartsView> {
   const w = getWorker()
   if (!w) {
     const serialized = toSerialized(input)
-    const result = await runPrepareSerialized(serialized)
+    const result = await runPrepareSerialized(serialized, onProgress)
     const lower = unpackGeometry(result.bottom)
     lower.computeVertexNormals()
     const upper = result.upper ? unpackGeometry(result.upper) : null
@@ -122,7 +134,7 @@ export async function loadPreparedWithWorker(
   const payload = { ...toSerialized(input), id }
 
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject })
+    pending.set(id, { resolve, reject, onProgress })
     w.postMessage(payload)
   })
 }

@@ -24,12 +24,16 @@ const BOX_TOOL_BUTTONS: OrbitMouseButtons = {
 /** While box-select is active, LMB draws the marquee — orbit with middle mouse. */
 export function OrbitControlsConfig() {
   const paintTool = useStore((s) => s.paintTool)
+  const preview = useStore((s) => s.preview)
   const controls = useThree((s) => s.controls)
 
   useEffect(() => {
     if (!controls || !('mouseButtons' in controls)) return
     const oc = controls as unknown as { mouseButtons: OrbitMouseButtons }
-    const next = paintTool === 'box' ? BOX_TOOL_BUTTONS : DEFAULT_BUTTONS
+    const next =
+      !preview && (paintTool === 'box' || paintTool === 'splitLine')
+        ? BOX_TOOL_BUTTONS
+        : DEFAULT_BUTTONS
     oc.mouseButtons.LEFT = next.LEFT
     oc.mouseButtons.MIDDLE = next.MIDDLE
     oc.mouseButtons.RIGHT = next.RIGHT
@@ -38,7 +42,7 @@ export function OrbitControlsConfig() {
       oc.mouseButtons.MIDDLE = DEFAULT_BUTTONS.MIDDLE
       oc.mouseButtons.RIGHT = DEFAULT_BUTTONS.RIGHT
     }
-  }, [paintTool, controls])
+  }, [paintTool, preview, controls])
 
   return null
 }

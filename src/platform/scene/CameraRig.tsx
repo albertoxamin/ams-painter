@@ -22,9 +22,10 @@ export default function CameraRig({ model }: { model: Model | null }) {
     camera.near = Math.max(0.01, maxDim / 500)
     camera.far = Math.max(5000, maxDim * 20)
     camera.updateProjectionMatrix()
-    if (controls && 'target' in controls) {
-      ;(controls as unknown as { target: THREE.Vector3; update: () => void }).target.set(0, 0, midZ)
-      ;(controls as unknown as { update: () => void }).update()
+    if (controls && typeof controls === 'object' && 'target' in controls) {
+      const oc = controls as { target: THREE.Vector3; update?: () => void }
+      oc.target.set(0, 0, midZ)
+      oc.update?.()
     }
   }, [model, camera, controls])
 

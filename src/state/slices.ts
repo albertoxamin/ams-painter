@@ -34,6 +34,7 @@ export interface PreviewSlice {
   esp: boolean
   explode: number
   busy: boolean
+  busyProgress: number | null
   error: string | null
 }
 

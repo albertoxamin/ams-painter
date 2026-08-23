@@ -6,13 +6,19 @@ import { runPrepareSerialized } from '../lib/prepareSerialized'
 
 export type CsgWorkerRequest = SerializedPrepareInput & { id: number }
 export type CsgWorkerResponse =
+  | { id: number; progress: number }
   | { id: number; ok: true; result: SerializedPrepareOutput }
   | { id: number; ok: false; error: string }
 
 self.onmessage = async (e: MessageEvent<CsgWorkerRequest>) => {
   const { id, ...input } = e.data
   try {
-    const result = await runPrepareSerialized(input)
+    const result = await runPrepareSerialized(input, (pct) => {
+      ;(self as unknown as Worker).postMessage({
+        id,
+        progress: pct,
+      } satisfies CsgWorkerResponse)
+    })
     // Structured clone copies typed arrays — avoids detached-buffer bugs from transferables.
     ;(self as unknown as Worker).postMessage({
       id,

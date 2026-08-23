@@ -13,6 +13,8 @@ export interface PenCutout {
   /** Closed loop vertices in model space (first ≠ last; we close implicitly). */
   loop: [number, number, number][]
   meta: InsertMeta
+  /** When true, insert is a planar prism (no interior mesh). */
+  flat?: boolean
 }
 
 export function loopToVectors(loop: [number, number, number][]): THREE.Vector3[] {
@@ -46,6 +48,72 @@ export function deeperFloorAlongAxis(
   return floor + sign * extra
 }
 
+function projectPerp(
+  x: number,
+  y: number,
+  z: number,
+  letter: 'x' | 'y' | 'z',
+): { u: number; v: number; w: number } {
+  if (letter === 'x') return { u: y, v: z, w: x }
+  if (letter === 'y') return { u: x, v: z, w: y }
+  return { u: x, v: y, w: z }
+}
+
+/** Even-odd test in the plane perpendicular to the cut axis. */
+export function pointInProjectedLoop(
+  u: number,
+  v: number,
+  ring: { u: number; v: number }[],
+): boolean {
+  const n = ring.length
+  if (n < 3) return false
+  let inside = false
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const ui = ring[i]!.u
+    const vi = ring[i]!.v
+    const uj = ring[j]!.u
+    const vj = ring[j]!.v
+    if (vi === vj) continue
+    const crosses = vi > v !== vj > v
+    if (crosses && u < ((uj - ui) * (v - vi)) / (vj - vi) + ui) inside = !inside
+  }
+  return inside
+}
+
+/**
+ * Triangles whose centroid projects inside the pen loop along the cut axis
+ * and whose axis-height lies in `[wMin, wMax]`. Useful for preview/tests;
+ * printable inserts use model∩prism instead of curtain-extruding these faces.
+ */
+export function facesInsideProjectedLoop(
+  geom: THREE.BufferGeometry,
+  loop: THREE.Vector3[],
+  axis: CutAxis,
+  wMin: number,
+  wMax: number,
+): Set<number> {
+  const faces = new Set<number>()
+  if (loop.length < 3) return faces
+  const letter = axisLetter(axis)
+  const ring = loop.map((p) => projectPerp(p.x, p.y, p.z, letter))
+  const lo = Math.min(wMin, wMax)
+  const hi = Math.max(wMin, wMax)
+  const pos = geom.getAttribute('position') as THREE.BufferAttribute
+  const triCount = Math.floor(pos.count / 3)
+  for (let t = 0; t < triCount; t++) {
+    const a = t * 3
+    const p0 = projectPerp(pos.getX(a), pos.getY(a), pos.getZ(a), letter)
+    const p1 = projectPerp(pos.getX(a + 1), pos.getY(a + 1), pos.getZ(a + 1), letter)
+    const p2 = projectPerp(pos.getX(a + 2), pos.getY(a + 2), pos.getZ(a + 2), letter)
+    const w = (p0.w + p1.w + p2.w) / 3
+    if (w < lo - 1e-4 || w > hi + 1e-4) continue
+    const u = (p0.u + p1.u + p2.u) / 3
+    const v = (p0.v + p1.v + p2.v) / 3
+    if (pointInProjectedLoop(u, v, ring)) faces.add(t)
+  }
+  return faces
+}
+
 export function loopSpan(
   loop: THREE.Vector3[],
   letter: 'x' | 'y' | 'z',
@@ -61,6 +129,87 @@ export function loopSpan(
   }
   const n = loop.length || 1
   return { min, max, mean: sum / n }
+}
+
+/** Project every loop vertex onto a plane of constant cut-axis coordinate `w`. */
+export function flattenLoopOnAxis(
+  loop: THREE.Vector3[],
+  axis: CutAxis,
+  w: number,
+): THREE.Vector3[] {
+  const letter = axisLetter(axis)
+  return loop.map((p) => {
+    const v = p.clone()
+    if (letter === 'x') v.x = w
+    else if (letter === 'y') v.y = w
+    else v.z = w
+    return v
+  })
+}
+
+/**
+ * Furthermost mesh coordinate along `axis` among triangles whose centroid
+ * projects inside `loop`, plus 1 mm outward so a flat insert clears the skin.
+ * Cut toward −Z → largest Z + 1 mm; toward +Z → smallest Z − 1 mm.
+ */
+export const FLAT_LOOP_PAD_MM = 1
+
+function outwardWithPad(
+  span: { min: number; max: number },
+  axis: CutAxis,
+): number {
+  const sign = axis[0] === '-' ? -1 : 1
+  const extreme = sign < 0 ? span.max : span.min
+  return extreme - sign * FLAT_LOOP_PAD_MM
+}
+
+export function meshFurthermostOnAxis(
+  geom: THREE.BufferGeometry,
+  loop: THREE.Vector3[],
+  axis: CutAxis,
+): number {
+  const letter = axisLetter(axis)
+  const faces = facesInsideProjectedLoop(
+    geom,
+    loop,
+    axis,
+    Number.NEGATIVE_INFINITY,
+    Number.POSITIVE_INFINITY,
+  )
+  const span =
+    faces.size > 0
+      ? (() => {
+          const pos = geom.getAttribute('position') as THREE.BufferAttribute
+          let min = Infinity
+          let max = -Infinity
+          for (const t of faces) {
+            const a = t * 3
+            for (let i = 0; i < 3; i++) {
+              const p = projectPerp(
+                pos.getX(a + i),
+                pos.getY(a + i),
+                pos.getZ(a + i),
+                letter,
+              )
+              min = Math.min(min, p.w)
+              max = Math.max(max, p.w)
+            }
+          }
+          return { min, max }
+        })()
+      : loopSpan(loop, letter)
+  return outwardWithPad(span, axis)
+}
+
+export function flattenPenLoopToMeshExtreme(
+  geom: THREE.BufferGeometry | null,
+  loop: THREE.Vector3[],
+  axis: CutAxis,
+): THREE.Vector3[] {
+  const w = geom
+    ? meshFurthermostOnAxis(geom, loop, axis)
+    : outwardWithPad(loopSpan(loop, axisLetter(axis)), axis)
+  return flattenLoopOnAxis(loop, axis, w)
 }
 
 function getCoord(x: number, y: number, z: number, letter: 'x' | 'y' | 'z'): number {
