@@ -29,8 +29,17 @@ function applyOrtho(cam: THREE.OrthographicCamera, aspect: number, dist: number)
   cam.updateProjectionMatrix()
 }
 
+type ProjectableCamera = THREE.PerspectiveCamera | THREE.OrthographicCamera
+
+function isProjectable(cam: THREE.Camera): cam is ProjectableCamera {
+  return (
+    cam instanceof THREE.PerspectiveCamera ||
+    cam instanceof THREE.OrthographicCamera
+  )
+}
+
 function snapCamera(
-  cam: THREE.Camera,
+  cam: ProjectableCamera,
   controls: unknown,
   viewFace: ReturnType<typeof useStore.getState>['viewFace'],
 ) {
@@ -84,11 +93,12 @@ export function CameraProjectionController() {
 
   useLayoutEffect(() => {
     if (!viewTick || viewTick === lastTick.current) return
-    const dest =
+    const dest: THREE.Camera =
       projection === 'isometric' && orthoRef.current
         ? orthoRef.current
         : camera
     lastTick.current = viewTick
+    if (!isProjectable(dest)) return
     snapCamera(dest, controls, viewFace)
     const other =
       dest === camera ? orthoRef.current : perspHold.current

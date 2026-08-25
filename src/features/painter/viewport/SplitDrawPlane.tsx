@@ -191,7 +191,7 @@ export function SplitDrawPlane() {
 
   useEffect(() => {
     if (!active || busy) return
-    const viewport = document.querySelector('.viewport')
+    const viewport = document.querySelector<HTMLElement>('.viewport')
     if (!viewport) return
 
     const onPointerDown = (e: PointerEvent) => {
