@@ -61,7 +61,6 @@ export function AxisGizmo({
         const d = Math.min(
           screenDist(clientX, clientY, _tip),
           screenDist(clientX, clientY, _mid),
-          screenDist(clientX, clientY, c),
         )
         if (d <= ndcThresh && (!best || d < best.d)) best = { id, d }
       }

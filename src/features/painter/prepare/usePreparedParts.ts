@@ -139,6 +139,8 @@ export function usePreparedParts(
     return () => {
       cancelled = true
       if (timer) clearTimeout(timer)
+      // Cancelled CSG must not leave the viewport stuck in busy (blocks picks).
+      onBusy?.(false)
     }
   }, [enabled, input, cacheKey, paused, debounceMs, onBusy, onError])
 

@@ -38,6 +38,25 @@ import { SplitCutOutline } from './overlays/SplitCutOutline'
 import { useInteraction } from '../interaction/InteractionContext'
 import { SplitPreview } from './SplitPreview'
 
+function disableRaycast() {}
+
+function commitIslandSelection(idx: number) {
+  const s = useStore.getState()
+  if (!s.model || idx < 0) return
+  const islands = listSelectionIslands(s.dropIn, s.model.adjacency)
+  const island = islands[idx]
+  if (!island) return
+  s.setActiveIsland(idx)
+  const m = resolveIslandMeta(island, s.dropInMeta, {
+    axis: s.cutAxis,
+    floor: s.dropInFloorZ,
+    colorId: s.brushColorId,
+  })
+  s.setCutAxis(m.axis)
+  s.setDropInFloorZ(m.floor)
+  s.setBrushColor(m.colorId)
+}
+
 export function ModelMesh() {
   const model = useStore((s) => s.model)
   const structural = useStore((s) => s.structural)
@@ -77,6 +96,8 @@ export function ModelMesh() {
   const gizmoHit = useRef(false)
   const downPoint = useRef<THREE.Vector2 | null>(null)
   const lastPaintPoint = useRef<THREE.Vector3 | null>(null)
+  const pendingIsland = useRef(-1)
+  const lastHitIdx = useRef<number | null>(null)
   const [hoverIdx, setHoverIdx] = useState<number | null>(null)
   const [penDraft, setPenDraft] = useState<THREE.Vector3[]>([])
   const [penCursor, setPenCursor] = useState<THREE.Vector3 | null>(null)
@@ -98,11 +119,6 @@ export function ModelMesh() {
     [cutAxis, dropInFloorZ, brushColorId],
   )
 
-  const hoveredIslandIdx = useMemo(() => {
-    if (hoverIdx == null || !dropIn.has(hoverIdx)) return -1
-    return dropInIslands.findIndex((isl) => isl.has(hoverIdx))
-  }, [hoverIdx, dropIn, dropInIslands])
-
   // Track painting in state so the axis gizmo unmounts during strokes
   const [isPainting, setIsPainting] = useState(false)
   const setPainting = (v: boolean) => {
@@ -111,21 +127,12 @@ export function ModelMesh() {
     setGlobalPainting(v)
   }
 
-  const gizmoIslandIdx = isPainting
-    ? -1
-    : paintTool === 'pen'
-      ? activePenIndex >= 0 && activePenIndex < penCutouts.length
-        ? -1
-        : hoveredIslandIdx >= 0
-          ? hoveredIslandIdx
-          : activeIsland >= 0 && activeIsland < dropInIslands.length
-            ? activeIsland
-            : -1
-      : hoveredIslandIdx >= 0
-        ? hoveredIslandIdx
-        : activeIsland >= 0 && activeIsland < dropInIslands.length
-          ? activeIsland
-          : -1
+  const gizmoIslandIdx =
+    isPainting || paintTool === 'pen'
+      ? -1
+      : activeIsland >= 0 && activeIsland < dropInIslands.length
+        ? activeIsland
+        : -1
 
   const gizmoPenIdx =
     isPainting || paintTool !== 'pen' || penDraft.length > 0
@@ -217,6 +224,7 @@ export function ModelMesh() {
     if (!model || !meshRef.current) return
     const hit = pickHit(e, meshRef.current, model.count)
     if (!hit) return
+    lastHitIdx.current = hit.idx
     setHoverIdx(hit.idx)
     if (
       lastPaintPoint.current &&
@@ -236,18 +244,72 @@ export function ModelMesh() {
     )
   }
 
-  const endPaint = () => {
-    if (!painting.current) return
-    setPainting(false)
-    lastPaintPoint.current = null
+  const restoreOrbit = () => {
     if (controls && 'enabled' in controls) {
       ;(controls as { enabled: boolean }).enabled = true
     }
   }
 
+  const endPaint = () => {
+    if (!painting.current) return
+    setPainting(false)
+    lastPaintPoint.current = null
+    restoreOrbit()
+  }
+
+  const beginBrushStroke = (e: ThreeEvent<PointerEvent>) => {
+    setPainting(true)
+    lastPaintPoint.current = null
+    setActiveIsland(-1)
+    beginStroke()
+    paintAt(e)
+  }
+
   useEffect(() => {
-    const up = () => {
+    if (!preview) return
+    pendingIsland.current = -1
+    downPoint.current = null
+    gizmoHit.current = false
+    endPaint()
+    restoreOrbit()
+    // preview toggle: drop any in-progress stroke and restore picking
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preview])
+
+  useEffect(() => {
+    const up = (e: PointerEvent) => {
+      if (
+        pendingIsland.current >= 0 &&
+        !painting.current &&
+        downPoint.current
+      ) {
+        const dx = e.clientX - downPoint.current.x
+        const dy = e.clientY - downPoint.current.y
+        if (dx * dx + dy * dy < 16) {
+          commitIslandSelection(pendingIsland.current)
+        }
+      } else if (
+        painting.current &&
+        downPoint.current &&
+        lastHitIdx.current != null
+      ) {
+        const dx = e.clientX - downPoint.current.x
+        const dy = e.clientY - downPoint.current.y
+        if (dx * dx + dy * dy < 16) {
+          const s = useStore.getState()
+          if (s.model) {
+            const islands = listSelectionIslands(s.dropIn, s.model.adjacency)
+            const idx = islands.findIndex((isl) =>
+              isl.has(lastHitIdx.current!),
+            )
+            if (idx >= 0) commitIslandSelection(idx)
+          }
+        }
+      }
+      pendingIsland.current = -1
+      downPoint.current = null
       endPaint()
+      restoreOrbit()
     }
     window.addEventListener('pointerup', up)
     window.addEventListener('pointercancel', up)
@@ -314,16 +376,18 @@ export function ModelMesh() {
     }
 
     e.stopPropagation()
-    setPainting(true)
-    lastPaintPoint.current = null
     downPoint.current = new THREE.Vector2(
       e.nativeEvent.clientX,
       e.nativeEvent.clientY,
     )
-    // Drop sticky island selection so the axis gizmo unmounts while painting
-    // a new region (otherwise arrows steal hits / block new selections).
-    setActiveIsland(-1)
-    beginStroke()
+    pendingIsland.current = -1
+    if (meshRef.current) {
+      const hit = pickHit(e, meshRef.current, model.count)
+      if (hit && dropIn.has(hit.idx) && !e.nativeEvent.shiftKey) {
+        const idx = dropInIslands.findIndex((isl) => isl.has(hit.idx))
+        if (idx >= 0) pendingIsland.current = idx
+      }
+    }
     if (controls && 'enabled' in controls) {
       ;(controls as { enabled: boolean }).enabled = false
     }
@@ -332,7 +396,9 @@ export function ModelMesh() {
     } catch {
       /* ignore */
     }
-    paintAt(e)
+    // Clicking an existing region selects it; drag (or empty mesh) paints.
+    if (pendingIsland.current >= 0) return
+    beginBrushStroke(e)
   }
 
   const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
@@ -353,6 +419,19 @@ export function ModelMesh() {
       if (hit) setHoverIdx(hit.idx)
       return
     }
+    if (
+      !painting.current &&
+      downPoint.current &&
+      pendingIsland.current >= 0
+    ) {
+      const dx = e.nativeEvent.clientX - downPoint.current.x
+      const dy = e.nativeEvent.clientY - downPoint.current.y
+      if (dx * dx + dy * dy >= 16) {
+        pendingIsland.current = -1
+        beginBrushStroke(e)
+      }
+      return
+    }
     if (painting.current) {
       e.stopPropagation()
       paintAt(e)
@@ -363,11 +442,6 @@ export function ModelMesh() {
 
     const hit = pickHit(e, meshRef.current, model.count)
     setHoverIdx(hit?.idx ?? null)
-    // Stick the island so gizmos stay mounted when moving onto handles
-    if (hit && dropIn.has(hit.idx)) {
-      const idx = dropInIslands.findIndex((isl) => isl.has(hit.idx))
-      if (idx >= 0 && activeIsland !== idx) setActiveIsland(idx)
-    }
   }
 
   const onPointerUp = (e: ThreeEvent<PointerEvent>) => {
@@ -376,32 +450,6 @@ export function ModelMesh() {
     } catch {
       /* ignore */
     }
-
-    if (preview) {
-      downPoint.current = null
-      endPaint()
-      return
-    }
-
-    // Short click on a drop-in face selects that island (gizmo / panel sync)
-    if (
-      painting.current &&
-      downPoint.current &&
-      model &&
-      meshRef.current
-    ) {
-      const dx = e.nativeEvent.clientX - downPoint.current.x
-      const dy = e.nativeEvent.clientY - downPoint.current.y
-      if (dx * dx + dy * dy < 16) {
-        const hit = pickHit(e, meshRef.current, model.count)
-        if (hit && dropIn.has(hit.idx)) {
-          const idx = dropInIslands.findIndex((isl) => isl.has(hit.idx))
-          if (idx >= 0) setActiveIsland(idx)
-        }
-      }
-    }
-    downPoint.current = null
-    endPaint()
   }
 
   const onPointerOut = () => {
@@ -424,7 +472,7 @@ export function ModelMesh() {
         geometry={model.geometry}
         visible={showSource}
         // Hidden meshes still raycast by default — block picks in preview.
-        raycast={showSource ? undefined : () => {}}
+        raycast={showSource ? THREE.Mesh.prototype.raycast : disableRaycast}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}

@@ -20,7 +20,7 @@ export const PAINT_TOOL_REGISTRY: Record<PaintTool, PaintToolDefinition> = {
     id: 'brush',
     label: 'Brush',
     shortcut: 'B',
-    hint: 'Drag to paint triangle selections on the mesh.',
+    hint: 'Drag to paint · Click a painted region to select it',
     usesBrushRadius: true,
     usesPaintTarget: true,
   },
