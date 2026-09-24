@@ -369,7 +369,7 @@ export function cutRegionsAtHeight(
   geom: THREE.BufferGeometry,
   H: number,
 ): CutRegion[] {
-  return nestCutLoops(stitchLoops(collectCutSegs(geom, H)))
+  return nestCutLoops(stitchPlanarSegments(collectCutSegs(geom, H)))
 }
 
 /**
