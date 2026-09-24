@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import * as THREE from 'three'
 import {
   useStore,
   resolveIslandMeta,
@@ -31,6 +32,14 @@ import {
 } from '../lib/selectionSnapshot'
 import { tryRestoreAutosave } from '../lib/restoreAutosave'
 import { loadEditorFile } from '../lib/loadEditorFile'
+import {
+  applyMeshBoolean,
+  centerGeometryOn,
+  primitiveGeometry,
+  selectionCentroid,
+  stlBufferToGeometry,
+  type MeshBooleanOp,
+} from '../lib/meshEdit'
 import { countSelectionIslands, listSelectionIslands } from '../lib/select'
 import { awaitPreparedParts } from '../features/painter/prepare/usePreparedParts'
 import {
@@ -175,6 +184,122 @@ function InsertInspector({
       )}
       {extra}
     </div>
+  )
+}
+
+function MeshBooleanSection() {
+  const model = useStore((s) => s.model)
+  const editCount = useStore((s) => s.editFaces.size)
+  const busy = useStore((s) => s.busy)
+  const setBusy = useStore((s) => s.setBusy)
+  const setError = useStore((s) => s.setError)
+  const replaceEditedGeometry = useStore((s) => s.replaceEditedGeometry)
+  const [op, setOp] = useState<MeshBooleanOp>('subtract')
+  const [shape, setShape] = useState<'box' | 'sphere'>('box')
+  const [size, setSize] = useState(10)
+  const fileRef = useRef<HTMLInputElement>(null)
+
+  const run = async (stl?: ArrayBuffer) => {
+    const s = useStore.getState()
+    if (!s.model) return
+    setBusy(true)
+    setError(null)
+    try {
+      const geom = s.model.geometry
+      geom.computeBoundingBox()
+      const center =
+        s.editFaces.size > 0
+          ? selectionCentroid(geom, s.editFaces)
+          : geom.boundingBox!.getCenter(new THREE.Vector3())
+      const cutter = stl
+        ? centerGeometryOn(stlBufferToGeometry(stl), center)
+        : primitiveGeometry(shape, center, size)
+      replaceEditedGeometry(await applyMeshBoolean(geom, cutter, op))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Boolean failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!model) return null
+
+  return (
+    <CollapsibleSection title="Mesh edit">
+      <p className="empty-state">
+        Applied to the base mesh before insert cuts.
+        {editCount > 0
+          ? ' Cutter sits on the yellow face selection.'
+          : ' Cutter sits on the mesh center.'}{' '}
+        Face inserts are cleared. Pen outlines stay.
+      </p>
+      <div className="bpy-prop-row">
+        <span className="bpy-prop-label">Op</span>
+        <div className="bpy-prop-buttons">
+          {(['subtract', 'union', 'intersect'] as const).map((id) => (
+            <button
+              key={id}
+              type="button"
+              className={op === id ? 'active' : ''}
+              onClick={() => setOp(id)}
+            >
+              {id === 'subtract' ? 'Subtract' : id === 'union' ? 'Union' : 'Intersect'}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="bpy-prop-row">
+        <span className="bpy-prop-label">Shape</span>
+        <div className="bpy-prop-buttons">
+          <button
+            type="button"
+            className={shape === 'box' ? 'active' : ''}
+            onClick={() => setShape('box')}
+          >
+            Box
+          </button>
+          <button
+            type="button"
+            className={shape === 'sphere' ? 'active' : ''}
+            onClick={() => setShape('sphere')}
+          >
+            Sphere
+          </button>
+        </div>
+      </div>
+      <label className="bpy-prop-row bpy-prop-slider">
+        <span className="bpy-prop-label">Size</span>
+        <input
+          type="range"
+          min={1}
+          max={80}
+          step={1}
+          value={size}
+          onChange={(e) => setSize(parseFloat(e.target.value))}
+        />
+        <span className="bpy-prop-value">{size.toFixed(0)}</span>
+      </label>
+      <div className="bpy-prop-buttons">
+        <button type="button" disabled={busy} onClick={() => void run()}>
+          Apply
+        </button>
+        <button type="button" disabled={busy} onClick={() => fileRef.current?.click()}>
+          STL…
+        </button>
+      </div>
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".stl"
+        hidden
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          e.target.value = ''
+          if (!file) return
+          void file.arrayBuffer().then((buf) => run(buf))
+        }}
+      />
+    </CollapsibleSection>
   )
 }
 
@@ -349,6 +474,12 @@ export default function SidePanel() {
         if (useStore.getState().preview) return
         e.preventDefault()
         setPaintTool('box')
+        return
+      }
+      if (key === 'v') {
+        if (useStore.getState().preview) return
+        e.preventDefault()
+        setPaintTool('move')
         return
       }
       if (key === 'n') {
@@ -755,6 +886,8 @@ export default function SidePanel() {
           </div>
         </div>
       </CollapsibleSection>
+
+      <MeshBooleanSection />
 
       <CollapsibleSection title="Insert regions" badge={insertCount || undefined}>
         {insertCount === 0 ? (

@@ -61,3 +61,36 @@ export function geometryToModel(
     sourceStl,
   }
 }
+
+/** Rebuild BVH and bounds in the current coordinate space. Does not recenter. */
+export function replaceModelGeometry(
+  prev: Model,
+  geom: THREE.BufferGeometry,
+): Model {
+  let g = geom.clone()
+  if (g.index) g = g.toNonIndexed()
+  g.computeVertexNormals()
+  g.computeBoundingBox()
+  const box = g.boundingBox!
+  const bvh = new MeshBVH(g, {
+    maxDepth: 32,
+    verbose: false,
+    indirect: true,
+  })
+  const stl = geometryToRawStlBytes(g)
+  const sourceStl = stl.buffer.slice(
+    stl.byteOffset,
+    stl.byteOffset + stl.byteLength,
+  ) as ArrayBuffer
+  return {
+    geometry: g,
+    bvh,
+    count: g.getAttribute('position').count / 3,
+    adjacency: buildAdjacency(g),
+    zMin: box.min.z,
+    zMax: box.max.z,
+    name: prev.name,
+    meshHash: hashArrayBufferSync(sourceStl),
+    sourceStl,
+  }
+}

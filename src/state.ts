@@ -9,6 +9,7 @@ import { axisBounds,
 import { type PenCutout, newPenCutoutId, flattenPenLoopToMeshExtreme } from './lib/penCutout'
 import { floodSelect, meshIslandFrom } from './lib/select'
 import type { Model } from './domain/model'
+import { replaceModelGeometry } from './lib/geometryToModel'
 import type { SplitLockAxis, SplitMode } from './lib/split'
 import { cloneNode, type SplitPathNode } from './lib/splitBezier'
 import {
@@ -19,7 +20,7 @@ import {
 } from './domain/palette'
 
 export type SelectionMode = 'add' | 'remove'
-export type PaintTool = 'brush' | 'pen' | 'flood' | 'box' | 'splitLine'
+export type PaintTool = 'brush' | 'pen' | 'flood' | 'box' | 'splitLine' | 'move'
 export type CameraProjection = 'perspective' | 'isometric'
 export type ViewFace = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right'
 export type SplitSplinePoint = SplitPathNode
@@ -34,6 +35,11 @@ interface SelSnap {
   dropIn: Set<number>
   dropInMeta: Map<number, InsertMeta>
   penCutouts: PenCutout[]
+  editFaces: Set<number>
+  /** Position attribute at undo time. Present only for a face move. */
+  positions?: Float32Array
+  /** Full geometry at undo time. Present only for a boolean. */
+  geometry?: THREE.BufferGeometry
 }
 
 const MAX_UNDO = 50
@@ -188,8 +194,21 @@ interface State {
   }) => void
   /** Push current selections onto the undo stack (call once per stroke). */
   beginStroke: () => void
+  /** Faces selected for mesh edit (move). Not an insert. */
+  editFaces: Set<number>
   /** Paint faces during an active stroke (no extra undo entries). */
   paintFaces: (idxs: number[], mode: SelectionMode) => void
+  paintEditFaces: (idxs: number[], mode: SelectionMode) => void
+  /** Undo snapshot that also stores vertex positions. */
+  beginMeshStroke: () => void
+  /** Rebuild BVH after a face move. Face indices are unchanged. */
+  commitMeshPositions: () => void
+  /**
+   * Replace the base mesh after a boolean. Clears face selections because
+   * triangle indices no longer match. Pen loops stay. Inserts are cut from
+   * this mesh afterwards.
+   */
+  replaceEditedGeometry: (geom: THREE.BufferGeometry) => void
   /** Flood-fill from a seed triangle and paint the result. */
   floodPaintAt: (faceIdx: number, mode: SelectionMode) => void
   /** Select all faces in the edge-connected island containing faceIdx. */
@@ -234,6 +253,30 @@ function snap(s: State): SelSnap {
     dropIn: cloneSel(s.dropIn),
     dropInMeta: cloneMeta(s.dropInMeta),
     penCutouts: clonePenCutouts(s.penCutouts),
+    editFaces: cloneSel(s.editFaces),
+  }
+}
+
+function applyGeometryUndo(
+  model: Model,
+  prev: SelSnap,
+): { model: Model; positions?: Float32Array; geometry?: THREE.BufferGeometry } {
+  if (prev.geometry) {
+    return {
+      model: replaceModelGeometry(model, prev.geometry),
+      geometry: model.geometry.clone(),
+    }
+  }
+  if (!prev.positions) return { model }
+  const attr = model.geometry.getAttribute('position') as THREE.BufferAttribute
+  const arr = attr.array as Float32Array
+  if (arr.length !== prev.positions.length) return { model }
+  const positions = new Float32Array(arr)
+  arr.set(prev.positions)
+  attr.needsUpdate = true
+  return {
+    model: replaceModelGeometry(model, model.geometry),
+    positions,
   }
 }
 
@@ -250,6 +293,7 @@ function restoreSnap(prev: SelSnap): Partial<State> {
     dropIn: prev.dropIn,
     dropInMeta: prev.dropInMeta,
     penCutouts: prev.penCutouts,
+    editFaces: prev.editFaces ?? new Set(),
     activeIsland: -1,
     activePenIndex: -1,
   }
@@ -285,6 +329,7 @@ export const useStore = create<State>((set, get) => ({
   dropIn: new Set<number>(),
   dropInMeta: new Map(),
   penCutouts: [],
+  editFaces: new Set<number>(),
   paintTool: 'brush',
   activePenIndex: -1,
   palette: DEFAULT_PALETTE.map((c) => ({ ...c })),
@@ -315,6 +360,7 @@ export const useStore = create<State>((set, get) => ({
       dropIn: new Set<number>(),
       dropInMeta: new Map(),
       penCutouts: [],
+      editFaces: new Set<number>(),
       undoStack: [],
       redoStack: [],
       preview: false,
@@ -892,6 +938,56 @@ export const useStore = create<State>((set, get) => ({
       return { structural, dropIn, dropInMeta }
     }),
 
+  paintEditFaces: (idxs, mode) =>
+    set((s) => {
+      if (idxs.length === 0) return s
+      const editFaces = cloneSel(s.editFaces)
+      if (mode === 'remove') {
+        for (const i of idxs) editFaces.delete(i)
+      } else {
+        for (const i of idxs) editFaces.add(i)
+      }
+      return { editFaces }
+    }),
+
+  beginMeshStroke: () =>
+    set((s) => {
+      if (!s.model) return s
+      const arr = s.model.geometry.getAttribute('position').array as Float32Array
+      return {
+        undoStack: [
+          ...s.undoStack.slice(-(MAX_UNDO - 1)),
+          { ...snap(s), positions: new Float32Array(arr) },
+        ],
+        redoStack: [],
+      }
+    }),
+
+  commitMeshPositions: () =>
+    set((s) => {
+      if (!s.model) return s
+      return { model: replaceModelGeometry(s.model, s.model.geometry) }
+    }),
+
+  replaceEditedGeometry: (geom) =>
+    set((s) => {
+      if (!s.model) return s
+      return {
+        undoStack: [
+          ...s.undoStack.slice(-(MAX_UNDO - 1)),
+          { ...snap(s), geometry: s.model.geometry.clone() },
+        ],
+        redoStack: [],
+        model: replaceModelGeometry(s.model, geom),
+        structural: new Set(),
+        dropIn: new Set(),
+        dropInMeta: new Map(),
+        editFaces: new Set(),
+        activeIsland: -1,
+        activePenIndex: -1,
+      }
+    }),
+
   floodPaintAt: (faceIdx, mode) => {
     const s = get()
     if (!s.model) return
@@ -928,7 +1024,8 @@ export const useStore = create<State>((set, get) => ({
     if (!s.model) return
     const faces = meshIslandFrom(faceIdx, s.model.adjacency)
     get().beginStroke()
-    get().paintFaces(faces, s.mode)
+    if (s.paintTool === 'move') get().paintEditFaces(faces, s.mode)
+    else get().paintFaces(faces, s.mode)
   },
 
   invertSelection: () =>
@@ -980,10 +1077,15 @@ export const useStore = create<State>((set, get) => ({
       if (s.undoStack.length === 0) return s
       const stack = s.undoStack.slice()
       const prev = stack.pop()!
+      const redoSnap = snap(s)
+      const undone = s.model ? applyGeometryUndo(s.model, prev) : null
+      if (undone?.positions) redoSnap.positions = undone.positions
+      if (undone?.geometry) redoSnap.geometry = undone.geometry
       return {
         ...restoreSnap(prev),
+        ...(undone ? { model: undone.model } : {}),
         undoStack: stack,
-        redoStack: [...s.redoStack.slice(-(MAX_UNDO - 1)), snap(s)],
+        redoStack: [...s.redoStack.slice(-(MAX_UNDO - 1)), redoSnap],
       }
     }),
 
@@ -992,16 +1094,26 @@ export const useStore = create<State>((set, get) => ({
       if (s.redoStack.length === 0) return s
       const stack = s.redoStack.slice()
       const next = stack.pop()!
+      const undoSnap = snap(s)
+      const redone = s.model ? applyGeometryUndo(s.model, next) : null
+      if (redone?.positions) undoSnap.positions = redone.positions
+      if (redone?.geometry) undoSnap.geometry = redone.geometry
       return {
         ...restoreSnap(next),
+        ...(redone ? { model: redone.model } : {}),
         redoStack: stack,
-        undoStack: [...s.undoStack.slice(-(MAX_UNDO - 1)), snap(s)],
+        undoStack: [...s.undoStack.slice(-(MAX_UNDO - 1)), undoSnap],
       }
     }),
 
   clearSelection: () => {
     const s = get()
-    if (s.structural.size === 0 && s.dropIn.size === 0 && s.penCutouts.length === 0)
+    if (
+      s.structural.size === 0 &&
+      s.dropIn.size === 0 &&
+      s.penCutouts.length === 0 &&
+      s.editFaces.size === 0
+    )
       return
     set({
       ...pushUndo(s),
@@ -1009,6 +1121,7 @@ export const useStore = create<State>((set, get) => ({
       dropIn: new Set<number>(),
       dropInMeta: new Map(),
       penCutouts: [],
+      editFaces: new Set<number>(),
       activeIsland: -1,
       activePenIndex: -1,
     })

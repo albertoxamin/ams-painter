@@ -56,12 +56,20 @@ export const PAINT_TOOL_REGISTRY: Record<PaintTool, PaintToolDefinition> = {
     usesBrushRadius: false,
     usesPaintTarget: false,
   },
+  move: {
+    id: 'move',
+    label: 'Move faces',
+    shortcut: 'V',
+    hint: 'Drag to select faces · drag a selected face to move it · Shift = erase · L = linked · booleans are in the side panel',
+    usesBrushRadius: true,
+    usesPaintTarget: false,
+  },
 }
 
 export const PAINT_TOOL_LIST = Object.values(PAINT_TOOL_REGISTRY)
 
 export const SHORTCUT_HELP = [
-  { keys: 'B / P / G / C / N', desc: 'Brush, Pen, Flood, Box, Split line' },
+  { keys: 'B / P / G / C / N / V', desc: 'Brush, Pen, Flood, Box, Split line, Move faces' },
   { keys: '1–4', desc: 'Palette colors' },
   { keys: 'X Y Z', desc: 'Toggle cut axis / sign' },
   { keys: '[ ]', desc: 'Brush radius' },
@@ -82,7 +90,7 @@ export function paintToolHint(
   },
 ): string {
   const def = PAINT_TOOL_REGISTRY[tool]
-  if (tool === 'pen' || tool === 'flood' || tool === 'box' || tool === 'splitLine')
+  if (tool === 'pen' || tool === 'flood' || tool === 'box' || tool === 'splitLine' || tool === 'move')
     return def.hint
   if (ctx.mode === 'remove') {
     return 'Drag to erase painted areas · Hold Shift while dragging'

@@ -41,6 +41,17 @@ function FloodIcon() {
   )
 }
 
+function MoveIcon() {
+  return (
+    <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>
+      <path
+        fill="currentColor"
+        d="M10 2 7.5 5h1.7v3.3H6V7.2L3 10l3 2.8v-1.5h3.2V14.8H7.5L10 18l2.5-3.2h-1.7v-3.5H14v1.5L17 10l-3-2.8v1.1h-3.2V5h1.7L10 2Z"
+      />
+    </svg>
+  )
+}
+
 function BoxIcon() {
   return (
     <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>
@@ -118,7 +129,7 @@ export default function ToolShelf() {
   const setSplitDrawFace = useStore((s) => s.setSplitDrawFace)
   const splitLockAxis = useStore((s) => s.splitLockAxis)
 
-  const paintTools = ['brush', 'pen', 'flood', 'box'] as const
+  const paintTools = ['brush', 'pen', 'flood', 'box', 'move'] as const
 
   return (
     <aside className="tool-shelf" aria-label="Tools">
@@ -140,6 +151,7 @@ export default function ToolShelf() {
             {tool === 'pen' && <PenIcon />}
             {tool === 'flood' && <FloodIcon />}
             {tool === 'box' && <BoxIcon />}
+            {tool === 'move' && <MoveIcon />}
           </button>
         ))}
         {!insertsOnly && (
@@ -199,7 +211,8 @@ export default function ToolShelf() {
 
           {(paintTool === 'brush' ||
             paintTool === 'flood' ||
-            paintTool === 'box') && (
+            paintTool === 'box' ||
+            paintTool === 'move') && (
             <>
               <div className="bpy-prop-row">
                 <span className="bpy-prop-label">Mode</span>
@@ -209,7 +222,7 @@ export default function ToolShelf() {
                     className={mode === 'add' ? 'active' : ''}
                     onClick={() => setMode('add')}
                   >
-                    Paint
+                    {paintTool === 'move' ? 'Select' : 'Paint'}
                   </button>
                   <button
                     type="button"
@@ -221,7 +234,7 @@ export default function ToolShelf() {
                 </div>
               </div>
 
-              {!insertsOnly && (
+              {!insertsOnly && paintTool !== 'move' && (
                 <div className="bpy-prop-row">
                   <span className="bpy-prop-label">Target</span>
                   <div className="bpy-prop-buttons">
@@ -243,7 +256,7 @@ export default function ToolShelf() {
                 </div>
               )}
 
-              {paintTool === 'brush' && (
+              {(paintTool === 'brush' || paintTool === 'move') && (
                 <label className="bpy-prop-row bpy-prop-slider">
                   <span className="bpy-prop-label">Radius</span>
                   <input
@@ -278,7 +291,8 @@ export default function ToolShelf() {
           {(paintTool === 'pen' ||
             paintTool === 'flood' ||
             paintTool === 'box' ||
-            paintTool === 'splitLine') && (
+            paintTool === 'splitLine' ||
+            paintTool === 'move') && (
             <p className="tool-shelf-hint">{PAINT_TOOL_REGISTRY[paintTool].hint}</p>
           )}
 

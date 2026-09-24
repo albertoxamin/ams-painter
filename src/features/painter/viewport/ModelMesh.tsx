@@ -7,6 +7,11 @@ import {
   paletteColor,
 } from '../../../state'
 import { facesNearPoint } from '../../../lib/brush'
+import {
+  applyCapturedMove,
+  capturePositions,
+  weldedVertexIndices,
+} from '../../../lib/meshEdit'
 import { listSelectionIslands } from '../../../lib/select'
 import {
   loopToVectors,
@@ -87,6 +92,10 @@ export function ModelMesh() {
   const setError = useStore((s) => s.setError)
   const beginStroke = useStore((s) => s.beginStroke)
   const paintFaces = useStore((s) => s.paintFaces)
+  const editFaces = useStore((s) => s.editFaces)
+  const paintEditFaces = useStore((s) => s.paintEditFaces)
+  const beginMeshStroke = useStore((s) => s.beginMeshStroke)
+  const commitMeshPositions = useStore((s) => s.commitMeshPositions)
   const floodPaintAt = useStore((s) => s.floodPaintAt)
   const selectLinkedAt = useStore((s) => s.selectLinkedAt)
   const busy = useStore((s) => s.busy)
@@ -98,6 +107,15 @@ export function ModelMesh() {
   const lastPaintPoint = useRef<THREE.Vector3 | null>(null)
   const pendingIsland = useRef(-1)
   const lastHitIdx = useRef<number | null>(null)
+  const moveDrag = useRef<{
+    indices: number[]
+    base: Float32Array
+    start: THREE.Vector3
+    plane: THREE.Plane
+  } | null>(null)
+  const raycaster = useRef(new THREE.Raycaster())
+  const moveHit = useRef(new THREE.Vector3())
+  const moveDelta = useRef(new THREE.Vector3())
   const [hoverIdx, setHoverIdx] = useState<number | null>(null)
   const [penDraft, setPenDraft] = useState<THREE.Vector3[]>([])
   const [penCursor, setPenCursor] = useState<THREE.Vector3 | null>(null)
@@ -250,7 +268,17 @@ export function ModelMesh() {
     }
   }
 
+  const glRef = useRef(gl)
+  const cameraRef = useRef(camera)
+  glRef.current = gl
+  cameraRef.current = camera
+
   const endPaint = () => {
+    if (moveDrag.current) {
+      moveDrag.current = null
+      commitMeshPositions()
+      restoreOrbit()
+    }
     if (!painting.current) return
     setPainting(false)
     lastPaintPoint.current = null
@@ -311,9 +339,25 @@ export function ModelMesh() {
       endPaint()
       restoreOrbit()
     }
+    const move = (e: PointerEvent) => {
+      const drag = moveDrag.current
+      const modelNow = useStore.getState().model
+      if (!drag || !modelNow) return
+      const rect = glRef.current.domElement.getBoundingClientRect()
+      const ndc = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      )
+      raycaster.current.setFromCamera(ndc, cameraRef.current)
+      if (!raycaster.current.ray.intersectPlane(drag.plane, moveHit.current)) return
+      moveDelta.current.copy(moveHit.current).sub(drag.start)
+      applyCapturedMove(modelNow.geometry, drag.indices, drag.base, moveDelta.current)
+    }
+    window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
     window.addEventListener('pointercancel', up)
     return () => {
+      window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
       window.removeEventListener('pointercancel', up)
     }
@@ -375,6 +419,42 @@ export function ModelMesh() {
       return
     }
 
+    if (paintTool === 'move') {
+      e.stopPropagation()
+      if (!meshRef.current) return
+      const hit = pickHit(e, meshRef.current, model.count)
+      if (!hit) return
+      if (!e.nativeEvent.shiftKey && editFaces.has(hit.idx) && editFaces.size > 0) {
+        const indices = weldedVertexIndices(model.geometry, editFaces)
+        const normal = new THREE.Vector3()
+        camera.getWorldDirection(normal)
+        const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, hit.point)
+        moveDrag.current = {
+          indices,
+          base: capturePositions(model.geometry, indices),
+          start: hit.point.clone(),
+          plane,
+        }
+        beginMeshStroke()
+        if (controls && 'enabled' in controls) {
+          ;(controls as { enabled: boolean }).enabled = false
+        }
+        return
+      }
+      if (controls && 'enabled' in controls) {
+        ;(controls as { enabled: boolean }).enabled = false
+      }
+      setPainting(true)
+      lastPaintPoint.current = null
+      beginStroke()
+      const faces =
+        brushRadius <= 0.05
+          ? [hit.idx]
+          : facesNearPoint(model.geometry, hit.point, brushRadius)
+      paintEditFaces(faces.length > 0 ? faces : [hit.idx], e.nativeEvent.shiftKey ? 'remove' : mode)
+      return
+    }
+
     e.stopPropagation()
     downPoint.current = new THREE.Vector2(
       e.nativeEvent.clientX,
@@ -430,6 +510,24 @@ export function ModelMesh() {
         pendingIsland.current = -1
         beginBrushStroke(e)
       }
+      return
+    }
+    if (painting.current && paintTool === 'move') {
+      e.stopPropagation()
+      const hit = pickHit(e, meshRef.current, model.count)
+      if (!hit) return
+      if (
+        lastPaintPoint.current &&
+        lastPaintPoint.current.distanceToSquared(hit.point) < (brushRadius * 0.2) ** 2
+      ) {
+        return
+      }
+      lastPaintPoint.current = hit.point.clone()
+      const faces =
+        brushRadius <= 0.05
+          ? [hit.idx]
+          : facesNearPoint(model.geometry, hit.point, brushRadius)
+      paintEditFaces(faces.length > 0 ? faces : [hit.idx], e.nativeEvent.shiftKey ? 'remove' : mode)
       return
     }
     if (painting.current) {
@@ -507,6 +605,12 @@ export function ModelMesh() {
             selection={structural}
             faceColor={COLORS.selected}
             outlineColor={COLORS.outline}
+          />
+          <SelectionOverlay
+            geom={model.geometry}
+            selection={editFaces}
+            faceColor="#f0c040"
+            outlineColor="#ffe08a"
           />
           {dropInIslands.map((island, i) => {
             const m = resolveIslandMeta(island, dropInMeta, {
