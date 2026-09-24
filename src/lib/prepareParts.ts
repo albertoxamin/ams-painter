@@ -3,7 +3,7 @@ import {
   buildInsert,
   resolveInsertFloors,
   flipAxis,
-  axisLetter,
+  insertExportRole,
   type CutAxis,
   type InsertMeta,
 } from './extrude'
@@ -49,12 +49,14 @@ export interface PreparedParts {
   /** shrunk structural insert fused into the bottom (null if none / inserts-only) */
   structuralInsert: THREE.BufferGeometry | null
   /**
-   * Separate drop-in inserts (shrunk for fit). Empty in split mode — those
-   * solids are merged into `bottom` as extra shells. Used in inserts-only mode.
+   * Separate drop-in inserts (shrunk for fit). Bottom-fused and painted
+   * regions are not included.
    */
   dropIns: THREE.BufferGeometry[]
   /** Cut axis used for each drop-in (parallel to dropIns). */
   dropInAxes: CutAxis[]
+  /** Palette color id for each drop-in (parallel to dropIns). */
+  dropInColorIds: string[]
   /** True when prepared without a horizontal split. */
   insertsOnly: boolean
 }
@@ -281,7 +283,7 @@ function metaForIsland(
   for (const f of faces) {
     const m = meta.get(f) ?? fallback
     const entryKey = m.entry !== undefined ? m.entry.toFixed(3) : '_'
-    const key = `${m.axis}|${m.floor.toFixed(3)}|${entryKey}|${m.colorId ?? ''}`
+    const key = `${m.axis}|${m.floor.toFixed(3)}|${entryKey}|${m.colorId ?? ''}|${m.role ?? 'insert'}`
     const cur = votes.get(key)
     if (cur) cur.n++
     else votes.set(key, { m, n: 1 })
@@ -323,14 +325,18 @@ export interface PreparePartsOptions {
 /**
  * Build printable parts with print clearance.
  *
+ * Each island's `role`:
+ * - insert: hole in the body, separate insert STL
+ * - paint: no piece and no hole; color is applied on the mesh that remains
+ * - bottom: split only; solid fused into the bottom, hole in the upper
+ *
  * Split mode (default):
  * - Split seam: lower ends at H - c/2, upper starts at H + c/2
  * - Structural faces → column fused into bottom (−Z to bed); hole in upper
- * - −Z drop-in islands → included in the bottom STL (separate shells, one file); hole in upper
- * - Lateral (X/Y) drop-ins are ignored in split mode
  *
  * Inserts-only mode:
  * - No split. Full body with holes for inserts + separate insert STLs.
+ * - Bottom-fused role is treated as a normal insert.
  */
 export async function prepareParts(
   geom: THREE.BufferGeometry,
@@ -377,11 +383,22 @@ export async function prepareParts(
     upper: THREE.BufferGeometry | null
     dropIns: THREE.BufferGeometry[]
     dropInAxes: CutAxis[]
+    dropInColorIds: string[]
   }> {
     let lower = bodyLower
     let upper = bodyUpper
     const dropIns: THREE.BufferGeometry[] = []
     const dropInAxes: CutAxis[] = []
+    const dropInColorIds: string[] = []
+    const pushInsert = (
+      fit: THREE.BufferGeometry,
+      axis: CutAxis,
+      colorId: string,
+    ) => {
+      dropIns.push(fit)
+      dropInAxes.push(axis)
+      dropInColorIds.push(colorId)
+    }
 
     const triCount = (g: THREE.BufferGeometry) =>
       g.index ? g.index.count / 3 : g.getAttribute('position').count / 3
@@ -415,12 +432,10 @@ export async function prepareParts(
 
     for (let i = 0; i < islands.length; i++) {
       const island = islands[i]!
-      const { axis, floor, entry } = metaForIsland(
-        island,
-        opts.dropInMeta,
-        fallback,
-      )
-      if (splitMode && axisLetter(axis) !== 'z') {
+      const meta = metaForIsland(island, opts.dropInMeta, fallback)
+      const { axis, floor, entry, colorId } = meta
+      const role = insertExportRole(meta.role, splitMode)
+      if (role === 'paint') {
         tickInsert(i + 1)
         continue
       }
@@ -437,7 +452,7 @@ export async function prepareParts(
       }
       if (!built) continue
 
-      if (splitMode && axisLetter(built.axis) === 'z') {
+      if (role === 'bottom') {
         await fuseToBottom(built.fit, built.cutter, `Insert island ${i}`)
         tickInsert(i + 1)
         continue
@@ -453,8 +468,7 @@ export async function prepareParts(
           console.warn(
             `Insert island ${i} (${axis} @ ${floor}) emptied the body; skipping cut`,
           )
-          dropIns.push(built.fit)
-          dropInAxes.push(built.axis)
+          pushInsert(built.fit, built.axis, colorId)
           continue
         }
         let nextUpper = upper
@@ -468,15 +482,13 @@ export async function prepareParts(
         }
         lower = nextLower
         upper = nextUpper
-        dropIns.push(built.fit)
-        dropInAxes.push(built.axis)
+        pushInsert(built.fit, built.axis, colorId)
       } catch (err) {
         console.warn(
           `Insert island ${i} (${axis} @ ${floor}) cut failed; keeping insert`,
           err,
         )
-        dropIns.push(built.fit)
-        dropInAxes.push(built.axis)
+        pushInsert(built.fit, built.axis, colorId)
       }
       tickInsert(i + 1)
     }
@@ -484,9 +496,10 @@ export async function prepareParts(
     const pens = opts.penCutouts ?? []
     for (let pi = 0; pi < pens.length; pi++) {
       const cutout = pens[pi]!
-      const { axis, floor, entry } = cutout.meta
+      const { axis, floor, entry, colorId } = cutout.meta
+      const role = insertExportRole(cutout.meta.role, splitMode)
       const loop = loopToVectors(cutout.loop)
-      if (splitMode && axisLetter(axis) !== 'z') {
+      if (role === 'paint') {
         tickInsert(islands.length + pi + 1)
         continue
       }
@@ -508,8 +521,9 @@ export async function prepareParts(
       }
       if (!built) continue
 
-      if (splitMode && axisLetter(built.axis) === 'z') {
+      if (role === 'bottom') {
         await fuseToBottom(built.fit, built.cutter, `Pen cutout ${pi}`)
+        tickInsert(islands.length + pi + 1)
         continue
       }
 
@@ -527,8 +541,7 @@ export async function prepareParts(
         }
         if (triCount(nextLower) < 8) {
           console.warn(`Pen cutout ${pi} emptied the body; skipping cut`)
-          dropIns.push(built.fit)
-          dropInAxes.push(built.axis)
+          pushInsert(built.fit, built.axis, colorId)
           continue
         }
         let nextUpper = upper
@@ -542,17 +555,15 @@ export async function prepareParts(
         }
         lower = nextLower
         upper = nextUpper
-        dropIns.push(built.fit)
-        dropInAxes.push(built.axis)
+        pushInsert(built.fit, built.axis, colorId)
       } catch (err) {
         console.warn(`Pen cutout ${pi} cut failed; keeping insert`, err)
-        dropIns.push(built.fit)
-        dropInAxes.push(built.axis)
+        pushInsert(built.fit, built.axis, colorId)
       }
       tickInsert(islands.length + pi + 1)
     }
 
-    return { lower, upper, dropIns, dropInAxes }
+    return { lower, upper, dropIns, dropInAxes, dropInColorIds }
   }
 
   if (insertsOnly) {
@@ -564,7 +575,10 @@ export async function prepareParts(
       body = geom
     }
     report(0.28)
-    const { lower, dropIns, dropInAxes } = await cutDropIns(body, null)
+    const { lower, dropIns, dropInAxes, dropInColorIds } = await cutDropIns(
+      body,
+      null,
+    )
     report(1)
     return {
       bottom: lower,
@@ -572,6 +586,7 @@ export async function prepareParts(
       structuralInsert: null,
       dropIns,
       dropInAxes,
+      dropInColorIds,
       insertsOnly: true,
     }
   }
@@ -613,6 +628,7 @@ export async function prepareParts(
     structuralInsert,
     dropIns: cut.dropIns,
     dropInAxes: cut.dropInAxes,
+    dropInColorIds: cut.dropInColorIds,
     insertsOnly: false,
   }
 }

@@ -3,6 +3,7 @@ import * as THREE from 'three'
 import { axisBounds,
   type CutAxis,
   type InsertMeta,
+  type InsertRole,
   type PaletteColor,
 } from './lib/extrude'
 import { type PenCutout, newPenCutoutId, flattenPenLoopToMeshExtreme } from './lib/penCutout'
@@ -145,6 +146,9 @@ interface State {
   applyBrushToIslands: (islands: Set<number>[]) => void
   /** Set cut axis on an island (remap floor); also syncs brush axis. */
   applyAxisToIsland: (faces: Set<number>, axis: CutAxis) => void
+  /** paint = color on the remaining mesh, insert = separate piece, bottom = fuse into the bottom (split only). */
+  applyRoleToIsland: (faces: Set<number>, role: InsertRole) => void
+  applyRoleToPenCutout: (id: string, role: InsertRole) => void
   /** Set pocket and/or entry depth on an island (from viewport drag handles). */
   applyDepthsToIsland: (
     faces: Set<number>,
@@ -209,6 +213,7 @@ function cloneMeta(m: Map<number, InsertMeta>): Map<number, InsertMeta> {
       floor: v.floor,
       colorId: v.colorId,
       ...(v.entry !== undefined ? { entry: v.entry } : {}),
+      ...(v.role ? { role: v.role } : {}),
     })
   }
   return out
@@ -601,6 +606,7 @@ export const useStore = create<State>((set, get) => ({
           floor,
           colorId: c.meta.colorId,
           entry: undefined,
+          ...(c.meta.role ? { role: c.meta.role } : {}),
         }
         any = true
       }
@@ -636,6 +642,30 @@ export const useStore = create<State>((set, get) => ({
       return out
     }),
 
+  applyRoleToIsland: (faces, role) =>
+    set((s) => {
+      if (faces.size === 0) return s
+      const dropInMeta = cloneMeta(s.dropInMeta)
+      let any = false
+      for (const f of faces) {
+        if (!s.dropIn.has(f)) continue
+        const prev = dropInMeta.get(f) ?? brushMetaFrom(s)
+        dropInMeta.set(f, { ...prev, role })
+        any = true
+      }
+      if (!any) return s
+      return { ...pushUndo(s), dropInMeta }
+    }),
+
+  applyRoleToPenCutout: (id, role) =>
+    set((s) => {
+      const penCutouts = clonePenCutouts(s.penCutouts)
+      const c = penCutouts.find((x) => x.id === id)
+      if (!c) return s
+      c.meta = { ...c.meta, role }
+      return { ...pushUndo(s), penCutouts }
+    }),
+
   applyBrushToIslands: (islands) =>
     set((s) => {
       if (islands.length === 0) return s
@@ -643,7 +673,13 @@ export const useStore = create<State>((set, get) => ({
       const brush = brushMetaFrom(s)
       for (const island of islands) {
         for (const f of island) {
-          if (s.dropIn.has(f)) dropInMeta.set(f, { ...brush })
+          if (s.dropIn.has(f)) {
+            const prev = dropInMeta.get(f)
+            dropInMeta.set(f, {
+              ...brush,
+              ...(prev?.role ? { role: prev.role } : {}),
+            })
+          }
         }
       }
       return {
@@ -668,6 +704,7 @@ export const useStore = create<State>((set, get) => ({
           floor,
           colorId: prev.colorId,
           entry: undefined,
+          ...(prev.role ? { role: prev.role } : {}),
         })
         any = true
       }
@@ -736,6 +773,7 @@ export const useStore = create<State>((set, get) => ({
         floor: m.floor,
         colorId: m.colorId || s.brushColorId,
         ...(m.entry !== undefined ? { entry: m.entry } : {}),
+        ...(m.role ? { role: m.role } : {}),
       })
     }
     set({
@@ -793,6 +831,7 @@ export const useStore = create<State>((set, get) => ({
           floor: c.meta.floor,
           colorId: c.meta.colorId,
           ...(c.meta.entry !== undefined ? { entry: c.meta.entry } : {}),
+          ...(c.meta.role ? { role: c.meta.role } : {}),
         },
         ...(c.flat ? { flat: true as const } : {}),
       }))

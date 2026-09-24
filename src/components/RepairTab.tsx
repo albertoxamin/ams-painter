@@ -199,6 +199,13 @@ export default function RepairTab() {
       <aside className="panel repair-panel">
         <section>
           <h3>GLB → STL Repair</h3>
+          <p className="help">
+            Repair runs on{' '}
+            <a href="https://www.formware.co/onlinestlrepair" target="_blank" rel="noreferrer">
+              Formware Online STL Repair
+            </a>
+            .
+          </p>
           <input
             ref={fileRef}
             type="file"

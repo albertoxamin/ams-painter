@@ -14,6 +14,7 @@ export interface PreparedPartsView {
   upper: THREE.BufferGeometry | null
   dropIns: THREE.BufferGeometry[]
   dropInAxes: CutAxis[]
+  dropInColorIds: string[]
   insertsOnly: boolean
 }
 

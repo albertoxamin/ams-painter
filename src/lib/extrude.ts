@@ -4,6 +4,14 @@ import { resolveSpanInsertFloors } from './insertDepth'
 /** Axis of the curtain extrusion for inserts. */
 export type CutAxis = '-z' | '+z' | '-x' | '+x' | '-y' | '+y'
 
+/**
+ * How a painted region is exported.
+ * paint: not a separate piece; color is painted on the mesh left after other cuts.
+ * insert: separate piece, hole in the body.
+ * bottom: fused into the bottom shell (split workflow only).
+ */
+export type InsertRole = 'paint' | 'insert' | 'bottom'
+
 /** Per-face / per-island cut settings for drop-in inserts. */
 export interface InsertMeta {
   axis: CutAxis
@@ -12,6 +20,18 @@ export interface InsertMeta {
   entry?: number
   /** Palette color id stamped when painting. */
   colorId: string
+  /** Omit = insert. */
+  role?: InsertRole
+}
+
+/** Role actually used when building parts. Bottom fuse needs a split. */
+export function insertExportRole(
+  role: InsertRole | undefined,
+  split: boolean,
+): InsertRole {
+  if (role === 'paint') return 'paint'
+  if (role === 'bottom' && split) return 'bottom'
+  return 'insert'
 }
 
 export interface PaletteColor {

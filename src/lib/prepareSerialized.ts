@@ -30,6 +30,7 @@ export interface SerializedPrepareOutput {
   upper: PackedGeometry | null
   dropIns: PackedGeometry[]
   dropInAxes: CutAxis[]
+  dropInColorIds: string[]
   insertsOnly: boolean
 }
 
@@ -73,6 +74,7 @@ export async function runPrepareSerialized(
     upper: prepared.upper ? pack(prepared.upper) : null,
     dropIns: prepared.dropIns.map(pack),
     dropInAxes: prepared.dropInAxes,
+    dropInColorIds: prepared.dropInColorIds,
     insertsOnly: prepared.insertsOnly,
   }
 }

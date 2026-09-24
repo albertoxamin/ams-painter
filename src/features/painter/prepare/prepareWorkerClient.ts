@@ -52,6 +52,7 @@ function getWorker(): Worker | null {
           upper,
           dropIns,
           dropInAxes: r.dropInAxes,
+          dropInColorIds: r.dropInColorIds ?? [],
           insertsOnly: r.insertsOnly,
         })
       }
@@ -78,6 +79,7 @@ function toSerialized(input: PreparePartsInput): SerializedPrepareInput {
       floor: v.floor,
       colorId: v.colorId,
       ...(v.entry !== undefined ? { entry: v.entry } : {}),
+      ...(v.role ? { role: v.role } : {}),
     }
   }
   return {
@@ -126,6 +128,7 @@ export async function loadPreparedWithWorker(
       upper,
       dropIns,
       dropInAxes: result.dropInAxes,
+      dropInColorIds: result.dropInColorIds,
       insertsOnly: result.insertsOnly,
     }
   }

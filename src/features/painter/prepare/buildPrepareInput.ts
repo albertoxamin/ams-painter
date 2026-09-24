@@ -88,7 +88,7 @@ function metaKey(meta: Map<number, InsertMeta>): string {
   const parts: string[] = []
   for (const [k, v] of [...meta.entries()].sort((a, b) => a[0] - b[0])) {
     parts.push(
-      `${k}:${v.axis}:${v.floor.toFixed(3)}:${v.entry?.toFixed(3) ?? '_'}:${v.colorId}`,
+      `${k}:${v.axis}:${v.floor.toFixed(3)}:${v.entry?.toFixed(3) ?? '_'}:${v.colorId}:${v.role ?? 'insert'}`,
     )
   }
   return parts.join('|')
@@ -98,7 +98,7 @@ function penKey(cutouts: PenCutout[]): string {
   return cutouts
     .map(
       (c) =>
-        `${c.id}:${c.meta.axis}:${c.meta.floor}:${c.meta.entry ?? '_'}:${c.flat ? 'f' : 'm'}:${c.loop.map((p) => p.map((n) => n.toFixed(2)).join(',')).join(';')}`,
+        `${c.id}:${c.meta.axis}:${c.meta.floor}:${c.meta.entry ?? '_'}:${c.meta.role ?? 'insert'}:${c.flat ? 'f' : 'm'}:${c.loop.map((p) => p.map((n) => n.toFixed(2)).join(',')).join(';')}`,
     )
     .join('|')
 }

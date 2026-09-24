@@ -66,7 +66,97 @@ function signedAreaXY(loop: THREE.Vector3[]): number {
   return a * 0.5
 }
 
-function stitchLoops(
+/**
+ * At a vertex where two cut loops only touch, take the next edge clockwise
+ * from the one we arrived on. Arbitrary neighbor order merges those loops and
+ * the cap fills the opening.
+ */
+export function nextBoundaryNeighbor<T>(
+  prev: T,
+  cur: T,
+  candidates: T[],
+  xy: (p: T) => { x: number; y: number },
+  same: (a: T, b: T) => boolean,
+): T | undefined {
+  const open = candidates.filter((c) => !same(c, prev))
+  if (open.length === 0) return undefined
+  if (open.length === 1) return open[0]
+  const c = xy(cur)
+  const p = xy(prev)
+  const back = Math.atan2(p.y - c.y, p.x - c.x)
+  let best = open[0]!
+  let bestDelta = Infinity
+  for (const cand of open) {
+    const q = xy(cand)
+    let delta = back - Math.atan2(q.y - c.y, q.x - c.x)
+    delta %= Math.PI * 2
+    if (delta < 0) delta += Math.PI * 2
+    if (delta <= 1e-8) continue
+    if (delta < bestDelta) {
+      bestDelta = delta
+      best = cand
+    }
+  }
+  return best
+}
+
+/** Triangulate a cap. Triangles whose centroid sits in a hole are dropped. */
+export function triangulateCap(
+  contour: THREE.Vector2[],
+  holes: THREE.Vector2[][],
+): { indices: number[][]; verts: THREE.Vector2[] } {
+  const valid = holes.filter((h) => h.length >= 3)
+  const insideHole = (x: number, y: number) =>
+    valid.some((h) => pointInLoop2(x, y, h))
+  try {
+    const tris = ShapeUtils.triangulateShape(contour, valid)
+    if (tris.length > 0) {
+      const verts = [...contour, ...valid.flat()]
+      const kept = tris.filter(([i0, i1, i2]) => {
+        const a = verts[i0!]
+        const b = verts[i1!]
+        const c = verts[i2!]
+        if (!a || !b || !c) return false
+        return !insideHole((a.x + b.x + c.x) / 3, (a.y + b.y + c.y) / 3)
+      })
+      return { indices: kept, verts }
+    }
+  } catch {
+    // Earcut failed. Fall through and cap the outer without covering holes.
+  }
+  let tris: number[][] = []
+  try {
+    tris = ShapeUtils.triangulateShape(contour, [])
+  } catch {
+    tris = []
+  }
+  if (tris.length === 0) {
+    for (let i = 1; i < contour.length - 1; i++) tris.push([0, i, i + 1])
+  }
+  const kept = tris.filter(([i0, i1, i2]) => {
+    const a = contour[i0!]
+    const b = contour[i1!]
+    const c = contour[i2!]
+    if (!a || !b || !c) return false
+    return !insideHole((a.x + b.x + c.x) / 3, (a.y + b.y + c.y) / 3)
+  })
+  return { indices: kept, verts: contour }
+}
+
+function pointInLoop2(x: number, y: number, loop: THREE.Vector2[]): boolean {
+  let inside = false
+  for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
+    const pi = loop[i]!
+    const pj = loop[j]!
+    const intersect =
+      pi.y > y !== pj.y > y &&
+      x < ((pj.x - pi.x) * (y - pi.y)) / (pj.y - pi.y + 1e-30) + pi.x
+    if (intersect) inside = !inside
+  }
+  return inside
+}
+
+export function stitchPlanarSegments(
   segs: { a: THREE.Vector3; b: THREE.Vector3 }[],
 ): THREE.Vector3[][] {
   const adj = new Map<string, THREE.Vector3[]>()
@@ -105,8 +195,15 @@ function stitchLoops(
       while (cur !== start && guard++ < adj.size + 2) {
         loop.push(pos.get(cur)!.clone())
         const cnn = adj.get(cur) ?? []
-        const next = cnn.find(
+        const open = cnn.filter(
           (p) => vkey(p) !== prev && !used.has(eid(cur, vkey(p))),
+        )
+        const next = nextBoundaryNeighbor(
+          pos.get(prev)!,
+          pos.get(cur)!,
+          open,
+          (p) => ({ x: p.x, y: p.y }),
+          (a, b) => vkey(a) === vkey(b),
         )
         if (!next) break
         used.add(eid(cur, vkey(next)))
@@ -152,9 +249,16 @@ export function nestCutLoops(loops: THREE.Vector3[][]): CutRegion[] {
   items.sort((a, b) => Math.abs(b.area) - Math.abs(a.area))
   const parent = items.map(() => -1)
   for (let i = 0; i < items.length; i++) {
-    const probe = items[i]!.loop[0]!
+    let sx = 0
+    let sy = 0
+    for (const p of items[i]!.loop) {
+      sx += p.x
+      sy += p.y
+    }
+    const px = sx / items[i]!.loop.length
+    const py = sy / items[i]!.loop.length
     for (let j = i - 1; j >= 0; j--) {
-      if (pointInLoop(probe.x, probe.y, items[j]!.loop)) {
+      if (pointInLoop(px, py, items[j]!.loop)) {
         parent[i] = j
         break
       }
@@ -213,14 +317,9 @@ function capTriangles(
     const holeLoops = region.holes.map((h) => orientLoop(h, !wantCcw))
     const contour = outer.map((p) => new THREE.Vector2(p.x, p.y))
     const holes = holeLoops.map((h) => h.map((p) => new THREE.Vector2(p.x, p.y)))
-    let tris: number[][] = []
-    try {
-      tris = ShapeUtils.triangulateShape(contour, holes)
-    } catch {
-      for (let i = 1; i < contour.length - 1; i++) tris.push([0, i, i + 1])
-    }
-    const verts = [...contour, ...holes.flat()]
-    for (const [i0, i1, i2] of tris) {
+    const cap = triangulateCap(contour, holes)
+    const verts = cap.verts
+    for (const [i0, i1, i2] of cap.indices) {
       const a = verts[i0!]
       const b = verts[i1!]
       const c = verts[i2!]
@@ -316,7 +415,7 @@ export function clipToSide(
     }
   }
 
-  const regions = nestCutLoops(stitchLoops(capSegs))
+  const regions = nestCutLoops(stitchPlanarSegments(capSegs))
   if (opts?.cap !== false) {
     const capped = opts?.fillCavities
       ? filterCavityHoles(regions, 0.25)

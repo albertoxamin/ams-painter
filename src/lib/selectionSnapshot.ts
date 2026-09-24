@@ -62,6 +62,7 @@ export function buildSelectionSnapshot(input: {
       floor: meta.floor,
       colorId: meta.colorId,
       ...(meta.entry !== undefined ? { entry: meta.entry } : {}),
+      ...(meta.role ? { role: meta.role } : {}),
     }
   }
 
@@ -93,6 +94,11 @@ export function buildSelectionSnapshot(input: {
         floor: c.meta.floor,
         colorId: c.meta.colorId,
         ...(c.meta.entry !== undefined ? { entry: c.meta.entry } : {}),
+        ...(c.meta.role === 'paint' ||
+        c.meta.role === 'insert' ||
+        c.meta.role === 'bottom'
+          ? { role: c.meta.role }
+          : {}),
       },
       ...(c.flat ? { flat: true as const } : {}),
     })),

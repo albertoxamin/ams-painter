@@ -59,7 +59,7 @@ describe('geometry pipeline', () => {
       0.15,
       { dropInFloorZ: H, adjacency: model.adjacency },
     )
-    expect(prepared.dropIns.length).toBe(0)
+    expect(prepared.dropIns.length).toBe(1)
     expect(prepared.upper).not.toBeNull()
   })
 

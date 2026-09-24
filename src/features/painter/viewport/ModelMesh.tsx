@@ -531,7 +531,8 @@ export function ModelMesh() {
                 colorId: brushColorId,
               })
               const col = paletteColor(palette, m.colorId)
-              return (
+              if (m.role === 'paint') return null
+            return (
                 <InsertEspOutline
                   key={`esp-${i}-${m.axis}-${m.floor.toFixed(2)}-${(m.entry ?? 0).toFixed(2)}-${col.id}`}
                   geom={model.geometry}
@@ -548,7 +549,13 @@ export function ModelMesh() {
           )}
         </>
       )}
-      {showSource && gizmoIslandIdx >= 0 && dropInIslands[gizmoIslandIdx] && (
+      {showSource &&
+        gizmoIslandIdx >= 0 &&
+        dropInIslands[gizmoIslandIdx] &&
+        resolveIslandMeta(dropInIslands[gizmoIslandIdx]!, dropInMeta, {
+          ...brushFallback,
+          colorId: brushColorId,
+        }).role !== 'paint' && (
         <>
           <AxisGizmo
             center={islandCentroid(
@@ -674,6 +681,7 @@ export function ModelMesh() {
       {showSource &&
         esp &&
         penCutouts.map((cutout) => {
+          if (cutout.meta.role === 'paint') return null
           const col = paletteColor(palette, cutout.meta.colorId)
           return (
             <PenEspOutline
@@ -685,7 +693,10 @@ export function ModelMesh() {
             />
           )
         })}
-      {showSource && gizmoPenIdx >= 0 && penCutouts[gizmoPenIdx] && (
+      {showSource &&
+        gizmoPenIdx >= 0 &&
+        penCutouts[gizmoPenIdx] &&
+        penCutouts[gizmoPenIdx]!.meta.role !== 'paint' && (
         <>
           <AxisGizmo
             center={penCutoutCentroid(

@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { analyzeMesh, type MeshAnalysis } from './meshAnalysis'
 import { loadGLBGeometry } from './loadGLB'
-import { repairMesh } from './stlRepair'
+import { repairGeometryWithFormware } from './formwareRepair'
 
 export type RepairStage =
   | 'idle'
@@ -35,7 +35,7 @@ export interface RepairResult {
 }
 
 /**
- * Full pipeline: load GLB → convert to mesh → analyze → repair → re-analyze.
+ * Full pipeline: load GLB → convert to STL → Formware online repair → re-analyze.
  */
 export async function repairGLB(
   buffer: ArrayBuffer,
@@ -55,14 +55,16 @@ export async function repairGLB(
   const before = analyzeMesh(beforeGeom)
   onProgress?.({ stage: 'analyzing', message: 'Analyzing file…', beforeChecks: before.checks })
 
-  report('repairing', 'Repairing mesh…', { repairPct: 0 })
-  const { geometry: repairedGeometry, manifold } = await repairMesh(
+  report('repairing', 'Uploading to Formware…', { repairPct: 0, beforeChecks: before.checks })
+  const stlName = name.replace(/\.[^.]+$/i, '') + '.stl'
+  const { geometry: repairedGeometry, job } = await repairGeometryWithFormware(
     rawGeometry,
-    (pct) =>
+    stlName,
+    (p) =>
       onProgress?.({
         stage: 'repairing',
-        message: `Repairing: ${pct.toFixed(0)}%`,
-        repairPct: pct,
+        message: p.message,
+        repairPct: p.pct,
         beforeChecks: before.checks,
       }),
   )
@@ -76,12 +78,15 @@ export async function repairGLB(
     afterChecks: after.checks,
   })
 
-  const vertexCountBefore = beforeGeom.getAttribute('position').count
-  const vertexCountAfter = repairedGeometry.getAttribute('position').count
-  const triangleCountBefore = before.triangleCount
-  const triangleCountAfter = after.triangleCount
+  const vertexCountBefore =
+    job.Analysis?.VerticesCount || beforeGeom.getAttribute('position').count
+  const vertexCountAfter =
+    job.Fix?.VerticesCount_Fixed || repairedGeometry.getAttribute('position').count
+  const triangleCountBefore = job.Analysis?.FaceCount || before.triangleCount
+  const triangleCountAfter = job.Fix?.FaceCount_Fixed || after.triangleCount
 
-  report('done', manifold ? 'File repaired' : 'Repair incomplete')
+  const repaired = job.Fixed || after.ok
+  report('done', repaired ? 'File repaired' : 'Repair incomplete')
 
   return {
     rawGeometry: beforeGeom,
@@ -89,12 +94,10 @@ export async function repairGLB(
     before,
     after,
     sourceName: name,
-    repaired: manifold || after.ok,
-    repairWarning: manifold
+    repaired,
+    repairWarning: repaired
       ? undefined
-      : after.ok
-        ? undefined
-        : 'Mesh improved but some issues may remain.',
+      : 'Formware ran but some issues may remain.',
     vertexCountBefore,
     vertexCountAfter,
     triangleCountBefore,

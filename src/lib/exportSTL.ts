@@ -88,7 +88,7 @@ export function discardFloatingRegions(
   return out
 }
 
-function prepareForPrint(
+export function prepareForPrint(
   geom: THREE.BufferGeometry,
   opts?: StlExportOptions,
 ): THREE.BufferGeometry {
@@ -194,9 +194,9 @@ function encName(name: string): Uint8Array {
  * Build an uncompressed (STORE) ZIP from named binary files.
  * Enough for STL bundles; no external dependency.
  */
-export function buildZip(
+export function buildZipBytes(
   files: { name: string; data: ArrayBuffer | ArrayBufferView }[],
-): Blob {
+): Uint8Array {
   const parts: Uint8Array[] = []
   const central: Uint8Array[] = []
   let offset = 0
@@ -277,7 +277,18 @@ export function buildZip(
     o += c.length
   }
   out.set(end, o)
-  return new Blob([out.buffer as ArrayBuffer], { type: 'application/zip' })
+  return out
+}
+
+export function buildZip(
+  files: { name: string; data: ArrayBuffer | ArrayBufferView }[],
+): Blob {
+  const out = buildZipBytes(files)
+  const ab = out.buffer.slice(
+    out.byteOffset,
+    out.byteOffset + out.byteLength,
+  ) as ArrayBuffer
+  return new Blob([ab], { type: 'application/zip' })
 }
 
 /** Download insert geometries as a ZIP of binary STL files. */
@@ -309,6 +320,8 @@ export function downloadAllPartsZip(input: {
   dropInNames?: (string | undefined)[]
   insertsOnly: boolean
   snapshot?: SelectionSnapshot
+  /** Bambu Studio 3MF (zip) with painted filament colors. */
+  bambu3mf?: Uint8Array
 }): void {
   const files: { name: string; data: Uint8Array }[] = []
   const base = input.baseName.replace(/\.stl$/i, '')
@@ -340,6 +353,13 @@ export function downloadAllPartsZip(input: {
     files.push({
       name: `${base}.amspaint.json`,
       data: new TextEncoder().encode(JSON.stringify(input.snapshot, null, 2)),
+    })
+  }
+
+  if (input.bambu3mf) {
+    files.push({
+      name: `${base}_bambu.3mf`,
+      data: input.bambu3mf,
     })
   }
 

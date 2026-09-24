@@ -1,10 +1,26 @@
-import { useEffect, useMemo, useRef, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, type CSSProperties, type ReactNode } from 'react'
 import {
   useStore,
   resolveIslandMeta,
   paletteColor,
 } from '../state'
-import { downloadSTL, downloadInsertsZip, downloadAllPartsZip } from '../lib/exportSTL'
+import {
+  downloadSTL,
+  downloadInsertsZip,
+  downloadAllPartsZip,
+  prepareForPrint,
+} from '../lib/exportSTL'
+import {
+  assignBambuExtruders,
+  buildBambu3mf,
+  colorIdsOnResultMesh,
+  concatGeometries,
+} from '../lib/bambuPaint'
+import {
+  facesInsideProjectedLoop,
+  loopSpan,
+  loopToVectors,
+} from '../lib/penCutout'
 import {
   buildSelectionSnapshot,
   downloadSelectionSnapshot,
@@ -16,8 +32,150 @@ import {
 import { tryRestoreAutosave } from '../lib/restoreAutosave'
 import { countSelectionIslands, listSelectionIslands } from '../lib/select'
 import { awaitPreparedParts } from '../features/painter/prepare/usePreparedParts'
-import { CUT_AXES, AXIS_COLORS, axisBounds, axisLetter } from '../lib/extrude'
+import {
+  CUT_AXES,
+  AXIS_COLORS,
+  axisBounds,
+  axisLetter,
+  type CutAxis,
+  type InsertRole,
+  type PaletteColor,
+} from '../lib/extrude'
 import CollapsibleSection from './layout/CollapsibleSection'
+
+function InsertInspector({
+  colorId,
+  axis,
+  floor,
+  bounds,
+  palette,
+  onColor,
+  onAxis,
+  onFloorStart,
+  onFloor,
+  role,
+  splitEnabled,
+  onRole,
+  extra,
+}: {
+  colorId: string
+  axis: CutAxis
+  floor: number
+  bounds: { min: number; max: number }
+  palette: PaletteColor[]
+  onColor: (id: string) => void
+  onAxis: (axis: CutAxis) => void
+  onFloorStart: () => void
+  onFloor: (floor: number) => void
+  role: InsertRole
+  splitEnabled: boolean
+  onRole: (role: InsertRole) => void
+  extra?: ReactNode
+}) {
+  const span = Math.max(bounds.max - bounds.min, 0.2)
+  const lo = bounds.min
+  const hi = bounds.min + span
+  const depth = Math.min(hi, Math.max(lo, floor))
+  return (
+    <div className="insert-inspector">
+      <div className="bpy-prop-row bpy-prop-colors">
+        <span className="bpy-prop-label">Color</span>
+        <div className="tool-swatches">
+          {palette.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              className={`swatch${colorId === c.id ? ' active' : ''}`}
+              title={c.name}
+              style={{ background: c.hex }}
+              onClick={() => onColor(c.id)}
+            />
+          ))}
+        </div>
+      </div>
+      <div className="bpy-prop-row">
+        <span className="bpy-prop-label">Kind</span>
+        <div className="bpy-prop-buttons insert-kind">
+          {(
+            [
+              ['paint', 'Painted only'],
+              ['insert', 'Insert'],
+              ['bottom', 'Bottom fused'],
+            ] as const
+          ).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              className={role === id ? 'active' : ''}
+              disabled={id === 'bottom' && !splitEnabled}
+              title={
+                id === 'bottom' && !splitEnabled
+                  ? 'Only in the Split workflow'
+                  : label
+              }
+              onClick={() => onRole(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {role === 'paint' && (
+        <p className="hint-line">
+          Other inserts still cut holes. This region is painted on the mesh that remains.
+        </p>
+      )}
+      {role !== 'paint' && (
+      <>
+      <div className="field">
+        <span>Direction</span>
+        <div className="modes axes">
+          {CUT_AXES.map((a) => {
+            const tint = AXIS_COLORS[axisLetter(a.id)]
+            return (
+              <button
+                key={a.id}
+                type="button"
+                className={axis === a.id ? 'active axis-tint' : 'axis-tint'}
+                title={a.title}
+                style={{ '--axis-tint': tint, color: tint } as CSSProperties}
+                onClick={() => onAxis(a.id)}
+              >
+                {a.label}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+      <label className="field">
+        <span>Depth ({axis})</span>
+        <div className="field-row">
+          <input
+            type="range"
+            min={lo}
+            max={hi}
+            step={0.1}
+            value={depth}
+            onPointerDown={onFloorStart}
+            onChange={(e) => onFloor(parseFloat(e.target.value))}
+          />
+          <input
+            type="number"
+            min={lo}
+            max={hi}
+            step={0.1}
+            value={Number(depth.toFixed(1))}
+            onFocus={onFloorStart}
+            onChange={(e) => onFloor(parseFloat(e.target.value) || lo)}
+          />
+        </div>
+      </label>
+      </>
+      )}
+      {extra}
+    </div>
+  )
+}
 
 export default function SidePanel() {
   const fileRef = useRef<HTMLInputElement>(null)
@@ -76,6 +234,13 @@ export default function SidePanel() {
   const removePenCutout = useStore((s) => s.removePenCutout)
   const flattenPenCutout = useStore((s) => s.flattenPenCutout)
   const applyColorToPenCutout = useStore((s) => s.applyColorToPenCutout)
+  const applyAxisToIsland = useStore((s) => s.applyAxisToIsland)
+  const applyDepthsToIsland = useStore((s) => s.applyDepthsToIsland)
+  const applyAxisToPenCutout = useStore((s) => s.applyAxisToPenCutout)
+  const applyDepthsToPenCutout = useStore((s) => s.applyDepthsToPenCutout)
+  const applyRoleToIsland = useStore((s) => s.applyRoleToIsland)
+  const applyRoleToPenCutout = useStore((s) => s.applyRoleToPenCutout)
+  const beginStroke = useStore((s) => s.beginStroke)
   const removeDropInFaces = useStore((s) => s.removeDropInFaces)
 
   const dropInIslands = useMemo(
@@ -253,13 +418,9 @@ export default function SidePanel() {
     try {
       const parts = await runPrepare()
       if (!parts) return
-      const colorNames = [
-        ...dropInIslands.map((island) => {
-          const m = resolveIslandMeta(island, dropInMeta, brushMeta)
-          return paletteColor(palette, m.colorId).name
-        }),
-        ...penCutouts.map((c) => paletteColor(palette, c.meta.colorId).name),
-      ]
+      const colorNames = parts.dropInColorIds.map(
+        (id) => paletteColor(palette, id).name,
+      )
       const snap = buildSelectionSnapshot({
         model,
         insertsOnly,
@@ -277,6 +438,73 @@ export default function SidePanel() {
         dropInMeta,
         penCutouts,
       })
+      const sourceFaceColor = new Map<number, string>()
+      for (const island of dropInIslands) {
+        const m = resolveIslandMeta(island, dropInMeta, brushMeta)
+        if (m.role !== 'paint') continue
+        for (const face of island) sourceFaceColor.set(face, m.colorId)
+      }
+      for (const cutout of penCutouts) {
+        if (cutout.meta.role !== 'paint') continue
+        const loop = loopToVectors(cutout.loop)
+        const span = loopSpan(loop, axisLetter(cutout.meta.axis))
+        // ponytail: paints the surface band under the loop (±1 mm), not the extruded pocket.
+        const faces = facesInsideProjectedLoop(
+          model.geometry,
+          loop,
+          cutout.meta.axis,
+          span.min - 1,
+          span.max + 1,
+        )
+        for (const face of faces) {
+          if (!sourceFaceColor.has(face)) {
+            sourceFaceColor.set(face, cutout.meta.colorId)
+          }
+        }
+      }
+      const printBottom = prepareForPrint(parts.bottom)
+      const printUpper = parts.upper
+        ? prepareForPrint(parts.upper, { dropFloating: true })
+        : null
+      const printInserts = parts.dropIns.map((geom) => prepareForPrint(geom))
+      const paintedGeoms = [printBottom, printUpper].filter(
+        (g): g is NonNullable<typeof g> => g != null,
+      )
+      const resultColors = paintedGeoms.flatMap((geom) =>
+        colorIdsOnResultMesh(geom, model.bvh, sourceFaceColor),
+      )
+      const resultGeom = concatGeometries(paintedGeoms)
+      const paintGroups = new Map<string, number[]>()
+      resultColors.forEach((id, face) => {
+        if (!id) return
+        const list = paintGroups.get(id)
+        if (list) list.push(face)
+        else paintGroups.set(id, [face])
+      })
+      const bambu = assignBambuExtruders({
+        triCount: resultColors.length,
+        palette,
+        regions: [...paintGroups.entries()].map(([colorId, faces]) => ({
+          colorId,
+          faces,
+        })),
+      })
+      const filaments = bambu.filaments.map((f) => ({ ...f }))
+      const slotByColorId = new Map<string, number>()
+      for (let i = 1; i < filaments.length; i++) {
+        const match = palette.find(
+          (c) =>
+            c.name === filaments[i]!.name &&
+            c.hex.toUpperCase() === filaments[i]!.hex.toUpperCase(),
+        )
+        if (match) slotByColorId.set(match.id, i + 1)
+      }
+      for (const id of parts.dropInColorIds) {
+        if (slotByColorId.has(id)) continue
+        const color = paletteColor(palette, id)
+        filaments.push({ name: color.name, hex: color.hex })
+        slotByColorId.set(id, filaments.length)
+      }
       downloadAllPartsZip({
         baseName: model.name,
         bottom: parts.bottom,
@@ -285,6 +513,24 @@ export default function SidePanel() {
         dropInNames: colorNames,
         insertsOnly: parts.insertsOnly,
         snapshot: snap,
+        bambu3mf: buildBambu3mf({
+          filaments,
+          objects: [
+            {
+              name: model.name,
+              geometry: resultGeom,
+              faceExtruder: bambu.faceExtruder,
+              extruder: 1,
+              plate: 1,
+            },
+            ...printInserts.map((geometry, i) => ({
+              name: colorNames[i] || `Insert ${i + 1}`,
+              geometry,
+              extruder: slotByColorId.get(parts.dropInColorIds[i] ?? '') ?? 1,
+              plate: 2,
+            })),
+          ],
+        }),
       })
     } catch (e) {
       setError((e as Error).message || 'Export failed')
@@ -378,6 +624,7 @@ export default function SidePanel() {
       bottom: prepared.lower,
       upper: prepared.upper,
       dropIns: prepared.dropIns,
+      dropInColorIds: prepared.dropInColorIds,
       insertsOnly: prepared.insertsOnly,
     }
   }
@@ -406,13 +653,9 @@ export default function SidePanel() {
           setError('No inserts marked yet')
           return
         }
-        const colorNames = [
-          ...dropInIslands.map((island) => {
-            const m = resolveIslandMeta(island, dropInMeta, brushMeta)
-            return paletteColor(palette, m.colorId).name
-          }),
-          ...penCutouts.map((c) => paletteColor(palette, c.meta.colorId).name),
-        ]
+        const colorNames = parts.dropInColorIds.map(
+          (id) => paletteColor(palette, id).name,
+        )
         downloadInsertsZip(parts.dropIns, base, colorNames)
       }
     } catch (e) {
@@ -527,20 +770,26 @@ export default function SidePanel() {
                       type="button"
                       className={`feature-row${active ? ' active' : ''}`}
                       onClick={() => {
-                        setActiveIsland(active ? -1 : i)
-                        setActivePenIndex(-1)
-                        if (!active) {
-                          setCutAxis(m.axis)
-                          setDropInFloorZ(m.floor)
-                          setBrushColor(m.colorId)
+                        if (active) {
+                          setActiveIsland(-1)
+                          return
                         }
+                        setActiveIsland(i)
+                        setCutAxis(m.axis)
+                        setDropInFloorZ(m.floor)
+                        setBrushColor(m.colorId)
                       }}
                     >
                       <span className="feature-chip" style={{ background: col.hex }} />
                       <span className="feature-body">
                         <strong>{col.name}</strong>
                         <span>
-                          Brush · {m.axis} · {m.floor.toFixed(1)} mm
+                          {m.role === 'paint'
+                            ? 'Painted only'
+                            : m.role === 'bottom'
+                              ? 'Bottom fused'
+                              : 'Insert'}{' '}
+                          · {m.axis} · {m.floor.toFixed(1)} mm
                         </span>
                       </span>
                     </button>
@@ -557,6 +806,27 @@ export default function SidePanel() {
                       ×
                     </button>
                   </div>
+                  {active && model && (
+                    <InsertInspector
+                      colorId={m.colorId}
+                      axis={m.axis}
+                      floor={m.floor}
+                      bounds={axisBounds(model, m.axis)}
+                      palette={palette}
+                      onColor={(id) => {
+                        setBrushColor(id)
+                        applyBrushToIslands([island])
+                      }}
+                      onAxis={(axis) => applyAxisToIsland(island, axis)}
+                      onFloorStart={beginStroke}
+                      onFloor={(floor) =>
+                        applyDepthsToIsland(island, { floor })
+                      }
+                      role={m.role ?? 'insert'}
+                      splitEnabled={!insertsOnly}
+                      onRole={(role) => applyRoleToIsland(island, role)}
+                    />
+                  )}
                 </li>
               )
             })}
@@ -578,7 +848,13 @@ export default function SidePanel() {
                       <span className="feature-body">
                         <strong>{col.name}</strong>
                         <span>
-                          Pen · {cutout.loop.length} pts · {cutout.meta.axis}
+                          Pen ·{' '}
+                          {cutout.meta.role === 'paint'
+                            ? 'Painted only'
+                            : cutout.meta.role === 'bottom'
+                              ? 'Bottom fused'
+                              : 'Insert'}{' '}
+                          · {cutout.meta.axis}
                           {cutout.flat ? ' · flat' : ''}
                         </span>
                       </span>
@@ -596,68 +872,42 @@ export default function SidePanel() {
                       ×
                     </button>
                   </div>
-                  <button
-                    type="button"
-                    className="block feature-flat"
-                    onClick={() => flattenPenCutout(cutout.id)}
-                  >
-                    Make it flat
-                  </button>
+                  {active && model && (
+                    <InsertInspector
+                      colorId={cutout.meta.colorId}
+                      axis={cutout.meta.axis}
+                      floor={cutout.meta.floor}
+                      bounds={axisBounds(model, cutout.meta.axis)}
+                      palette={palette}
+                      onColor={(id) => applyColorToPenCutout(cutout.id, id)}
+                      onAxis={(axis) => applyAxisToPenCutout(cutout.id, axis)}
+                      onFloorStart={beginStroke}
+                      onFloor={(floor) =>
+                        applyDepthsToPenCutout(cutout.id, { floor })
+                      }
+                      role={cutout.meta.role ?? 'insert'}
+                      splitEnabled={!insertsOnly}
+                      onRole={(role) => applyRoleToPenCutout(cutout.id, role)}
+                      extra={
+                        <>
+                          <button
+                            type="button"
+                            className="block feature-flat"
+                            onClick={() => flattenPenCutout(cutout.id)}
+                          >
+                            Make it flat
+                          </button>
+                          <p className="hint-line">
+                            Drag points · click an edge to add · Alt-click a point to delete
+                          </p>
+                        </>
+                      }
+                    />
+                  )}
                 </li>
               )
             })}
           </ul>
-        )}
-
-        {activeIsland >= 0 && activeIsland < dropInIslands.length && (
-          <div className="insert-props">
-            <div className="bpy-prop-row bpy-prop-colors">
-              <span className="bpy-prop-label">Color</span>
-              <div className="tool-swatches">
-                {palette.slice(0, 6).map((c) => (
-                  <button
-                    key={c.id}
-                    type="button"
-                    className={`swatch${brushColorId === c.id ? ' active' : ''}`}
-                    title={c.name}
-                    style={{ background: c.hex }}
-                    onClick={() => {
-                      setBrushColor(c.id)
-                      applyBrushToIslands([dropInIslands[activeIsland]!])
-                    }}
-                  />
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-        {activePenIndex >= 0 && activePenIndex < penCutouts.length && (
-          <div className="insert-props">
-            <div className="bpy-prop-row bpy-prop-colors">
-              <span className="bpy-prop-label">Color</span>
-              <div className="tool-swatches">
-                {palette.slice(0, 6).map((c) => (
-                  <button
-                    key={c.id}
-                    type="button"
-                    className={`swatch${
-                      penCutouts[activePenIndex]!.meta.colorId === c.id
-                        ? ' active'
-                        : ''
-                    }`}
-                    title={c.name}
-                    style={{ background: c.hex }}
-                    onClick={() =>
-                      applyColorToPenCutout(penCutouts[activePenIndex]!.id, c.id)
-                    }
-                  />
-                ))}
-              </div>
-            </div>
-            <p className="hint-line">
-              Drag points · click an edge to add · Alt-click a point to delete
-            </p>
-          </div>
         )}
 
         {hasMarks && (
@@ -702,6 +952,9 @@ export default function SidePanel() {
           >
             Export all (.zip)
           </button>
+          <p className="hint-line">
+            Zip includes a Bambu Studio 3MF. Each painted color is its own filament.
+          </p>
           <button
             className="primary"
             onClick={() => doExport('bottom')}

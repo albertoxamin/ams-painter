@@ -1,7 +1,7 @@
 import type { ComponentType, LazyExoticComponent } from 'react'
 import { lazy } from 'react'
 
-export type AppFeatureId = 'painter' | 'repair' | 'wheels'
+export type AppFeatureId = 'painter' | 'repair' | 'wheels' | 'generate'
 
 export interface AppFeature {
   id: AppFeatureId
@@ -26,5 +26,10 @@ export const APP_FEATURES: AppFeature[] = [
     id: 'wheels',
     label: 'Toy car wheels',
     Component: lazy(() => import('../components/WheelTab')),
+  },
+  {
+    id: 'generate',
+    label: 'Gemini → Meshy → GLB',
+    Component: lazy(() => import('../components/GenerateTab')),
   },
 ]

@@ -17,7 +17,7 @@ export function resolveIslandMeta(
   for (const f of faces) {
     const m = meta.get(f) ?? fallback
     const entryKey = m.entry !== undefined ? m.entry.toFixed(3) : '_'
-    const key = `${m.axis}|${m.floor.toFixed(3)}|${entryKey}|${m.colorId}`
+    const key = `${m.axis}|${m.floor.toFixed(3)}|${entryKey}|${m.colorId}|${m.role ?? 'insert'}`
     const cur = votes.get(key)
     if (cur) cur.n++
     else votes.set(key, { meta: m, n: 1 })

@@ -537,6 +537,11 @@ button.subtle:hover:not(:disabled) {
   border-radius: 2px;
 }
 
+.feature-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
 .feature-list > li {
   display: flex;
   flex-direction: column;
@@ -577,14 +582,19 @@ button.subtle:hover:not(:disabled) {
   border-color: var(--bpy-danger);
   background: rgba(224, 80, 80, 0.12);
 }
-.insert-props {
+.insert-inspector {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--bpy-border);
+  gap: 8px;
+  margin: 4px 0 2px;
+  padding: 8px;
+  border: 1px solid var(--bpy-select);
+  background: var(--bpy-bg-dark);
 }
+.insert-inspector .field { margin: 0; }
+.insert-inspector .modes button { padding: 3px 2px; font-size: 10px; }
+.insert-kind { flex-wrap: wrap; }
+.insert-kind button { flex: 1 1 30%; font-size: 10px; line-height: 1.2; }
 .feature-row {
   width: 100%;
   text-align: left;
@@ -1072,4 +1082,53 @@ button.subtle:hover:not(:disabled) {
   background: rgba(232, 102, 42, 0.08);
   pointer-events: none;
   z-index: 10;
+}
+
+/* ── Generate tab (Gemini → Meshy → GLB) ── */
+.gen-image-overlay {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  max-width: 38%;
+  border: 1px solid var(--bpy-border);
+  border-radius: 4px;
+  background: var(--bpy-panel);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 5;
+}
+.gen-image-overlay img {
+  width: 100%;
+  height: auto;
+  border-radius: 2px;
+  display: block;
+}
+.gen-image-tag {
+  font-size: 10px;
+  color: var(--bpy-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.gen-token-area,
+.gen-prompt-area {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bpy-bg-dark);
+  border: 1px solid var(--bpy-border-light);
+  color: var(--bpy-text);
+  border-radius: 2px;
+  padding: 4px 6px;
+  font-size: 11px;
+  font-family: ui-monospace, 'Cascadia Code', 'SF Mono', monospace;
+  resize: vertical;
+  line-height: 1.4;
+}
+.gen-token-area {
+  word-break: break-all;
+}
+.gen-log {
+  max-height: 220px;
+  overflow-y: auto;
 }
