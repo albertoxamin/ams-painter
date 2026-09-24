@@ -3,6 +3,7 @@ import { MeshBVH } from 'three-mesh-bvh'
 import type { Model } from '../domain/model'
 import { buildAdjacency } from './select'
 import { hashArrayBufferSync } from './meshHash'
+import { geometryToRawStlBytes } from './formwareRepair'
 
 /**
  * Turn a BufferGeometry into a viewport-ready Model.
@@ -42,10 +43,21 @@ export function geometryToModel(
 
   const count = g.getAttribute('position').count / 3
   const adjacency = buildAdjacency(g)
-  const pos = g.getAttribute('position') as THREE.BufferAttribute
-  const arr = pos.array as Float32Array
-  const bytes = new Uint8Array(arr.length * 4)
-  bytes.set(new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength))
-  const meshHash = hashArrayBufferSync(bytes.buffer)
-  return { geometry: g, bvh, count, adjacency, zMin, zMax, name, meshHash }
+  const stl = geometryToRawStlBytes(g)
+  const sourceStl = stl.buffer.slice(
+    stl.byteOffset,
+    stl.byteOffset + stl.byteLength,
+  ) as ArrayBuffer
+  const meshHash = hashArrayBufferSync(sourceStl)
+  return {
+    geometry: g,
+    bvh,
+    count,
+    adjacency,
+    zMin,
+    zMax,
+    name,
+    meshHash,
+    sourceStl,
+  }
 }

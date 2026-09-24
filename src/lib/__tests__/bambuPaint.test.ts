@@ -8,6 +8,8 @@ import {
   colorIdsOnResultMesh,
 } from '../bambuPaint'
 import { insertExportRole } from '../extrude'
+import { buildZipBytes, readStoredZip } from '../exportSTL'
+import { pickProjectStl } from '../loadEditorFile'
 
 describe('insertExportRole', () => {
   it('keeps bottom fuse for split only', () => {
@@ -111,5 +113,53 @@ describe('buildBambu3mf', () => {
     expect(text).toContain('Bambu Lab P1S')
     expect(text).toContain('plater_id" value="2"')
     expect(text).toContain('object_id" value="2"')
+  })
+})
+
+describe('buildZipBytes', () => {
+  it('stamps entries with today instead of the DOS zero date', () => {
+    const zip = buildZipBytes([
+      { name: 'a.txt', data: new TextEncoder().encode('hi') },
+    ])
+    let at = -1
+    for (let i = 0; i < zip.length - 4; i++) {
+      if (
+        zip[i] === 0x50 &&
+        zip[i + 1] === 0x4b &&
+        zip[i + 2] === 0x01 &&
+        zip[i + 3] === 0x02
+      ) {
+        at = i
+        break
+      }
+    }
+    expect(at).toBeGreaterThanOrEqual(0)
+    const view = new DataView(zip.buffer, zip.byteOffset + at)
+    const date = view.getUint16(14, true)
+    const now = new Date()
+    expect(((date >> 9) & 127) + 1980).toBe(now.getFullYear())
+    expect((date >> 5) & 15).toBe(now.getMonth() + 1)
+    expect(date & 31).toBe(now.getDate())
+  })
+
+  it('round-trips a project zip and picks the original STL', () => {
+    const original = new TextEncoder().encode('solid')
+    const part = new TextEncoder().encode('body')
+    const json = new TextEncoder().encode(
+      JSON.stringify({ name: 'car.stl' }),
+    )
+    const zip = buildZipBytes([
+      { name: 'car_body.stl', data: part },
+      { name: 'car.stl', data: original },
+      { name: 'car.amspaint.json', data: json },
+    ])
+    const files = readStoredZip(zip)
+    expect(files.map((f) => f.name)).toEqual([
+      'car_body.stl',
+      'car.stl',
+      'car.amspaint.json',
+    ])
+    const picked = pickProjectStl(files, 'car.stl')
+    expect(new TextDecoder().decode(picked!)).toBe('solid')
   })
 })

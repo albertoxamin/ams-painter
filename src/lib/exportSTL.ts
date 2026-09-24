@@ -190,6 +190,15 @@ function encName(name: string): Uint8Array {
   return new TextEncoder().encode(name)
 }
 
+/** MS-DOS date/time. All zeros is read as 30 Nov 1979. */
+function dosDateTime(d = new Date()): { date: number; time: number } {
+  const year = Math.max(1980, d.getFullYear())
+  const date = ((year - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate()
+  const time =
+    (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1)
+  return { date, time }
+}
+
 /**
  * Build an uncompressed (STORE) ZIP from named binary files.
  * Enough for STL bundles; no external dependency.
@@ -200,6 +209,7 @@ export function buildZipBytes(
   const parts: Uint8Array[] = []
   const central: Uint8Array[] = []
   let offset = 0
+  const stamp = dosDateTime()
 
   for (const file of files) {
     const name = encName(file.name)
@@ -213,8 +223,8 @@ export function buildZipBytes(
     lv.setUint16(4, 20, true) // version needed
     lv.setUint16(6, 0, true) // flags
     lv.setUint16(8, 0, true) // STORE
-    lv.setUint16(10, 0, true) // time
-    lv.setUint16(12, 0, true) // date
+    lv.setUint16(10, stamp.time, true)
+    lv.setUint16(12, stamp.date, true)
     lv.setUint32(14, crc, true)
     lv.setUint32(18, size, true)
     lv.setUint32(22, size, true)
@@ -231,8 +241,8 @@ export function buildZipBytes(
     cv.setUint16(6, 20, true)
     cv.setUint16(8, 0, true)
     cv.setUint16(10, 0, true) // STORE
-    cv.setUint16(12, 0, true)
-    cv.setUint16(14, 0, true)
+    cv.setUint16(12, stamp.time, true)
+    cv.setUint16(14, stamp.date, true)
     cv.setUint32(16, crc, true)
     cv.setUint32(20, size, true)
     cv.setUint32(24, size, true)
@@ -280,6 +290,40 @@ export function buildZipBytes(
   return out
 }
 
+/** Read a STORE zip (the kind this app writes). Deflate entries are rejected. */
+export function readStoredZip(
+  bytes: Uint8Array,
+): { name: string; data: Uint8Array }[] {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const files: { name: string; data: Uint8Array }[] = []
+  let offset = 0
+  const decoder = new TextDecoder()
+  while (offset + 30 <= bytes.length) {
+    const sig = view.getUint32(offset, true)
+    if (sig === 0x02014b50 || sig === 0x06054b50) break
+    if (sig !== 0x04034b50) {
+      throw new Error('Not a zip file')
+    }
+    const method = view.getUint16(offset + 8, true)
+    const compSize = view.getUint32(offset + 18, true)
+    const nameLen = view.getUint16(offset + 26, true)
+    const extraLen = view.getUint16(offset + 28, true)
+    const nameStart = offset + 30
+    const dataStart = nameStart + nameLen + extraLen
+    const dataEnd = dataStart + compSize
+    if (dataEnd > bytes.length) throw new Error('Zip entry is truncated')
+    const name = decoder.decode(bytes.subarray(nameStart, nameStart + nameLen))
+    if (method !== 0) {
+      throw new Error(`Zip entry ${name} is compressed`)
+    }
+    if (!name.endsWith('/')) {
+      files.push({ name, data: bytes.slice(dataStart, dataEnd) })
+    }
+    offset = dataEnd
+  }
+  return files
+}
+
 export function buildZip(
   files: { name: string; data: ArrayBuffer | ArrayBufferView }[],
 ): Blob {
@@ -322,9 +366,18 @@ export function downloadAllPartsZip(input: {
   snapshot?: SelectionSnapshot
   /** Bambu Studio 3MF (zip) with painted filament colors. */
   bambu3mf?: Uint8Array
+  /** Original STL bytes so the zip can be dropped back into the editor. */
+  originalStl?: Uint8Array
 }): void {
   const files: { name: string; data: Uint8Array }[] = []
   const base = input.baseName.replace(/\.stl$/i, '')
+
+  if (input.originalStl) {
+    const originalName = input.baseName.toLowerCase().endsWith('.stl')
+      ? input.baseName
+      : `${base}.stl`
+    files.push({ name: originalName, data: input.originalStl })
+  }
 
   files.push({
     name: input.insertsOnly ? `${base}_body.stl` : `${base}_bottom.stl`,

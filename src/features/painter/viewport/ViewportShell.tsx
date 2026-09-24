@@ -4,6 +4,7 @@ import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { useStore } from '../../../state'
 import { MESH_TRI_WARN } from '../../../lib/selectionSnapshot'
+import { loadEditorFile } from '../../../lib/loadEditorFile'
 import { tryRestoreAutosave } from '../../../lib/restoreAutosave'
 import { InteractionProvider } from '../interaction/InteractionContext'
 import { useFileDrop } from '../../../platform/io/useFileDrop'
@@ -32,23 +33,27 @@ export default function Viewport() {
   const onFile = useCallback(
     async (file: File) => {
       try {
-        const buf = await file.arrayBuffer()
-        const { loadSTL } = await import('../../../lib/loadSTL')
-        const m = loadSTL(buf, file.name)
-        setModel(m)
-        if (m.count > MESH_TRI_WARN) {
+        const loaded = await loadEditorFile(file)
+        setModel(loaded.model)
+        if (loaded.snapshot) {
+          restoreSelectionSnapshot(loaded.snapshot)
+          setError(null)
+        } else if (loaded.model.count > MESH_TRI_WARN) {
           setError(
-            `Large mesh (${m.count.toLocaleString()} tris). Painting may be slow — consider Repair tab to simplify first.`,
+            `Large mesh (${loaded.model.count.toLocaleString()} tris). Painting may be slow — consider Repair tab to simplify first.`,
           )
         } else {
           setError(null)
         }
-        const restored = await tryRestoreAutosave(m, restoreSelectionSnapshot)
-        if (restored) {
-          setError(null)
+        if (!loaded.snapshot) {
+          const restored = await tryRestoreAutosave(
+            loaded.model,
+            restoreSelectionSnapshot,
+          )
+          if (restored) setError(null)
         }
       } catch (e) {
-        setError((e as Error).message || 'Failed to load STL')
+        setError((e as Error).message || 'Failed to load file')
       }
     },
     [setModel, setError, restoreSelectionSnapshot],

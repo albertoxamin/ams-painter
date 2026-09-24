@@ -14,4 +14,6 @@ export interface Model {
   name: string
   /** Content hash of source STL bytes (for autosave / project matching). */
   meshHash: string
+  /** Original STL bytes, so an export zip can be dropped back in. */
+  sourceStl: ArrayBuffer
 }

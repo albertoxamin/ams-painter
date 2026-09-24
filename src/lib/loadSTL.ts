@@ -49,5 +49,15 @@ export function loadSTL(buffer: ArrayBuffer, name: string): Model {
   const count = geom.getAttribute('position').count / 3
   const adjacency = buildAdjacency(geom)
   const meshHash = hashArrayBufferSync(buffer)
-  return { geometry: geom, bvh, count, adjacency, zMin, zMax, name, meshHash }
+  return {
+    geometry: geom,
+    bvh,
+    count,
+    adjacency,
+    zMin,
+    zMax,
+    name,
+    meshHash,
+    sourceStl: buffer,
+  }
 }

@@ -30,6 +30,7 @@ import {
   MESH_TRI_WARN,
 } from '../lib/selectionSnapshot'
 import { tryRestoreAutosave } from '../lib/restoreAutosave'
+import { loadEditorFile } from '../lib/loadEditorFile'
 import { countSelectionIslands, listSelectionIslands } from '../lib/select'
 import { awaitPreparedParts } from '../features/painter/prepare/usePreparedParts'
 import {
@@ -366,20 +367,23 @@ export default function SidePanel() {
 
   const onFile = async (file: File) => {
     try {
-      const buf = await file.arrayBuffer()
-      const { loadSTL } = await import('../lib/loadSTL')
-      const m = loadSTL(buf, file.name)
-      setModel(m)
-      if (m.count > MESH_TRI_WARN) {
+      const loaded = await loadEditorFile(file)
+      setModel(loaded.model)
+      if (loaded.snapshot) {
+        restoreSelectionSnapshot(loaded.snapshot)
+        setError(null)
+        return
+      }
+      if (loaded.model.count > MESH_TRI_WARN) {
         setError(
-          `Large mesh (${m.count.toLocaleString()} tris). Consider simplifying in Repair tab first.`,
+          `Large mesh (${loaded.model.count.toLocaleString()} tris). Consider simplifying in Repair tab first.`,
         )
       } else {
         setError(null)
       }
-      await tryRestoreAutosave(m, restoreSelectionSnapshot)
+      await tryRestoreAutosave(loaded.model, restoreSelectionSnapshot)
     } catch (e) {
-      setError((e as Error).message || 'Failed to load STL')
+      setError((e as Error).message || 'Failed to load file')
     }
   }
 
@@ -513,6 +517,7 @@ export default function SidePanel() {
         dropInNames: colorNames,
         insertsOnly: parts.insertsOnly,
         snapshot: snap,
+        originalStl: new Uint8Array(model.sourceStl),
         bambu3mf: buildBambu3mf({
           filaments,
           objects: [
@@ -670,7 +675,7 @@ export default function SidePanel() {
       <input
         ref={fileRef}
         type="file"
-        accept=".stl"
+        accept=".stl,.zip,application/zip"
         style={{ display: 'none' }}
         onChange={(e) => {
           const f = e.target.files?.[0]
