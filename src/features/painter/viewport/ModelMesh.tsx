@@ -42,6 +42,7 @@ import { SelectionOverlay } from './overlays/SelectionOverlay'
 import { SplitCutOutline } from './overlays/SplitCutOutline'
 import { useInteraction } from '../interaction/InteractionContext'
 import { SplitPreview } from './SplitPreview'
+import { isCutterGizmoDragging } from './BooleanCutterGhost'
 
 function disableRaycast() {}
 
@@ -376,7 +377,7 @@ export function ModelMesh() {
     ) {
       return
     }
-    if (gizmoHit.current || anyHitIsGizmo(e)) {
+    if (gizmoHit.current || anyHitIsGizmo(e) || isCutterGizmoDragging()) {
       e.stopPropagation()
       return
     }
@@ -492,6 +493,10 @@ export function ModelMesh() {
       return
     }
 
+    if (isCutterGizmoDragging()) {
+      if (painting.current) endPaint()
+      return
+    }
     if (paintTool === 'pen' && !painting.current) {
       if (gizmoHit.current || anyHitIsGizmo(e)) return
       const hit = pickHit(e, meshRef.current, model.count)
