@@ -4,6 +4,7 @@ import {
   applyCapturedMove,
   applyMeshBoolean,
   capturePositions,
+  draftCutterGeometry,
   primitiveGeometry,
   weldedVertexIndices,
 } from '../meshEdit'
@@ -19,6 +20,20 @@ describe('meshEdit', () => {
     applyCapturedMove(geom, indices, base, new THREE.Vector3(1, 0, 0))
     expect(geom.getAttribute('position').count).toBe(before)
     expect(geom.getAttribute('position').getX(indices[0]!)).toBeCloseTo(x0 + 1)
+  })
+
+  it('places the cutter at the draft position', () => {
+    const cutter = draftCutterGeometry({
+      op: 'subtract',
+      kind: 'box',
+      size: 4,
+      position: [10, 0, 2],
+      stl: null,
+    })
+    cutter.computeBoundingBox()
+    const box = cutter.boundingBox!
+    expect((box.min.x + box.max.x) / 2).toBeCloseTo(10)
+    expect((box.min.z + box.max.z) / 2).toBeCloseTo(2)
   })
 
   it('subtracts a box from a box', async () => {

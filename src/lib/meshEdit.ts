@@ -123,6 +123,36 @@ export function centerGeometryOn(
   return g
 }
 
+export interface BooleanDraft {
+  op: MeshBooleanOp
+  kind: 'box' | 'sphere' | 'stl'
+  /** Box/sphere edge length in mm. STL uniform scale. */
+  size: number
+  position: [number, number, number]
+  /** STL soup centered on the origin. */
+  stl: THREE.BufferGeometry | null
+}
+
+/** Cutter geometry in model space, ready for a boolean. */
+export function draftCutterGeometry(draft: BooleanDraft): THREE.BufferGeometry {
+  const center = new THREE.Vector3(...draft.position)
+  if (draft.kind === 'stl') {
+    if (!draft.stl) throw new Error('Missing STL cutter')
+    const g = draft.stl.clone()
+    g.scale(draft.size, draft.size, draft.size)
+    g.translate(center.x, center.y, center.z)
+    g.computeVertexNormals()
+    g.computeBoundingBox()
+    return g
+  }
+  return primitiveGeometry(draft.kind, center, draft.size)
+}
+
+/** Same cutter with its origin at (0,0,0), for a mesh placed at `position`. */
+export function draftLocalGeometry(draft: BooleanDraft): THREE.BufferGeometry {
+  return draftCutterGeometry({ ...draft, position: [0, 0, 0] })
+}
+
 export async function applyMeshBoolean(
   target: THREE.BufferGeometry,
   cutter: THREE.BufferGeometry,

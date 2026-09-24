@@ -60,7 +60,7 @@ export const PAINT_TOOL_REGISTRY: Record<PaintTool, PaintToolDefinition> = {
     id: 'move',
     label: 'Move faces',
     shortcut: 'V',
-    hint: 'Drag to select faces · drag a selected face to move it · Shift = erase · L = linked · booleans are in the side panel',
+    hint: 'Drag to select faces · drag a selected face to move it · Shift = erase · L = linked',
     usesBrushRadius: true,
     usesPaintTarget: false,
   },

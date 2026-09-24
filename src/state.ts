@@ -10,6 +10,7 @@ import { type PenCutout, newPenCutoutId, flattenPenLoopToMeshExtreme } from './l
 import { floodSelect, meshIslandFrom } from './lib/select'
 import type { Model } from './domain/model'
 import { replaceModelGeometry } from './lib/geometryToModel'
+import type { BooleanDraft } from './lib/meshEdit'
 import type { SplitLockAxis, SplitMode } from './lib/split'
 import { cloneNode, type SplitPathNode } from './lib/splitBezier'
 import {
@@ -209,6 +210,12 @@ interface State {
    * this mesh afterwards.
    */
   replaceEditedGeometry: (geom: THREE.BufferGeometry) => void
+  /** Gray cutter shown in the view. Apply runs the boolean. */
+  booleanDraft: BooleanDraft | null
+  placeBooleanCutter: (draft: BooleanDraft) => void
+  patchBooleanCutter: (patch: Partial<BooleanDraft>) => void
+  setBooleanPosition: (x: number, y: number, z: number) => void
+  clearBooleanCutter: () => void
   /** Flood-fill from a seed triangle and paint the result. */
   floodPaintAt: (faceIdx: number, mode: SelectionMode) => void
   /** Select all faces in the edge-connected island containing faceIdx. */
@@ -348,13 +355,16 @@ export const useStore = create<State>((set, get) => ({
   esp: true,
   explode: 0.45,
   floodAngleDeg: 18,
+  booleanDraft: null,
   busy: false,
   busyProgress: null,
   error: null,
 
   setModel: (m) => {
+    get().booleanDraft?.stl?.dispose()
     const split = m ? Math.round((m.zMin + m.zMax) / 2) : 0
     set({
+      booleanDraft: null,
       model: m,
       structural: new Set<number>(),
       dropIn: new Set<number>(),
@@ -967,6 +977,34 @@ export const useStore = create<State>((set, get) => ({
     set((s) => {
       if (!s.model) return s
       return { model: replaceModelGeometry(s.model, s.model.geometry) }
+    }),
+
+  placeBooleanCutter: (draft) =>
+    set((s) => {
+      if (s.booleanDraft?.stl && s.booleanDraft.stl !== draft.stl) {
+        s.booleanDraft.stl.dispose()
+      }
+      return { booleanDraft: draft }
+    }),
+
+  patchBooleanCutter: (patch) =>
+    set((s) => {
+      if (!s.booleanDraft) return s
+      return { booleanDraft: { ...s.booleanDraft, ...patch } }
+    }),
+
+  setBooleanPosition: (x, y, z) =>
+    set((s) => {
+      const d = s.booleanDraft
+      if (!d) return s
+      if (d.position[0] === x && d.position[1] === y && d.position[2] === z) return s
+      return { booleanDraft: { ...d, position: [x, y, z] } }
+    }),
+
+  clearBooleanCutter: () =>
+    set((s) => {
+      s.booleanDraft?.stl?.dispose()
+      return { booleanDraft: null }
     }),
 
   replaceEditedGeometry: (geom) =>

@@ -11,6 +11,7 @@ import { useFileDrop } from '../../../platform/io/useFileDrop'
 import CameraRig from '../../../platform/scene/CameraRig'
 import ZUpGrid from '../../../platform/scene/ZUpGrid'
 import { ModelMesh } from './ModelMesh'
+import { BooleanCutterGhost } from './BooleanCutterGhost'
 import { BoxSelectOverlay } from '../../../components/BoxSelectOverlay'
 import BoxSelectLayer from '../../../components/BoxSelectLayer'
 import { ViewportPickBridge } from './ViewportPickBridge'
@@ -92,6 +93,7 @@ export default function Viewport() {
           <directionalLight position={[-150, 100, 200]} intensity={0.4} />
           <ZUpGrid />
           <ModelMesh />
+          <BooleanCutterGhost />
           <SplitDrawPlane />
           <CameraRig model={model} />
           <ViewportPickBridge />

@@ -82,8 +82,12 @@ function UndoIcon() {
   return (
     <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>
       <path
-        fill="currentColor"
-        d="M7 4 3 8l4 4V9.5c2.5 0 4.8 1.3 6.1 3.5 1.3-2.2 3.6-3.5 6.1-3.5V6c-3.3 0-6.2 1.6-8 4.1C9.2 7.6 6.3 6 3 6V4Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M7.2 12.2 3 8m0 0 4.2-4.2M3 8h8.2a4.2 4.2 0 0 1 0 8.4H9"
       />
     </svg>
   )
@@ -93,8 +97,12 @@ function RedoIcon() {
   return (
     <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>
       <path
-        fill="currentColor"
-        d="M13 4h3v3l-4-4 4-4v3c3.3 0 6.2 1.6 8 4.1C21.8 7.6 18.9 6 15.5 6V4ZM10 9.5c2.5 0 4.8 1.3 6.1 3.5H10V9.5Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M12.8 12.2 17 8m0 0-4.2-4.2M17 8H8.8a4.2 4.2 0 0 0 0 8.4H11"
       />
     </svg>
   )
@@ -173,25 +181,27 @@ export default function ToolShelf() {
             <SplitLineIcon />
           </button>
         )}
-        <div className="tool-shelf-divider" />
-        <button
-          type="button"
-          className="tool-icon"
-          title="Undo (⌘Z)"
-          disabled={!model || undoStack.length === 0}
-          onClick={undo}
-        >
-          <UndoIcon />
-        </button>
-        <button
-          type="button"
-          className="tool-icon"
-          title="Redo (⌘⇧Z)"
-          disabled={!model || redoStack.length === 0}
-          onClick={redo}
-        >
-          <RedoIcon />
-        </button>
+        <div className="tool-shelf-history">
+          <div className="tool-shelf-divider" />
+          <button
+            type="button"
+            className="tool-icon"
+            title="Undo (⌘Z)"
+            disabled={!model || undoStack.length === 0}
+            onClick={undo}
+          >
+            <UndoIcon />
+          </button>
+          <button
+            type="button"
+            className="tool-icon"
+            title="Redo (⌘⇧Z)"
+            disabled={!model || redoStack.length === 0}
+            onClick={redo}
+          >
+            <RedoIcon />
+          </button>
+        </div>
       </div>
 
       {model && (

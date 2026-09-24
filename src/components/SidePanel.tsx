@@ -35,7 +35,7 @@ import { loadEditorFile } from '../lib/loadEditorFile'
 import {
   applyMeshBoolean,
   centerGeometryOn,
-  primitiveGeometry,
+  draftCutterGeometry,
   selectionCentroid,
   stlBufferToGeometry,
   type MeshBooleanOp,
@@ -187,34 +187,67 @@ function InsertInspector({
   )
 }
 
+function cutterStart(geom: THREE.BufferGeometry, faces: Set<number>): [number, number, number] {
+  if (faces.size > 0) {
+    const c = selectionCentroid(geom, faces)
+    return [c.x, c.y, c.z]
+  }
+  geom.computeBoundingBox()
+  const box = geom.boundingBox!
+  return [
+    (box.min.x + box.max.x) / 2,
+    (box.min.y + box.max.y) / 2,
+    (box.min.z + box.max.z) / 2,
+  ]
+}
+
 function MeshBooleanSection() {
   const model = useStore((s) => s.model)
-  const editCount = useStore((s) => s.editFaces.size)
+  const draft = useStore((s) => s.booleanDraft)
   const busy = useStore((s) => s.busy)
   const setBusy = useStore((s) => s.setBusy)
   const setError = useStore((s) => s.setError)
+  const placeBooleanCutter = useStore((s) => s.placeBooleanCutter)
+  const patchBooleanCutter = useStore((s) => s.patchBooleanCutter)
+  const clearBooleanCutter = useStore((s) => s.clearBooleanCutter)
   const replaceEditedGeometry = useStore((s) => s.replaceEditedGeometry)
   const [op, setOp] = useState<MeshBooleanOp>('subtract')
-  const [shape, setShape] = useState<'box' | 'sphere'>('box')
   const [size, setSize] = useState(10)
   const fileRef = useRef<HTMLInputElement>(null)
+  const activeOp = draft?.op ?? op
+  const activeSize = draft?.size ?? size
+  const stlMode = draft?.kind === 'stl'
 
-  const run = async (stl?: ArrayBuffer) => {
+  const place = (kind: 'box' | 'sphere', nextSize = size) => {
     const s = useStore.getState()
     if (!s.model) return
+    const position =
+      s.booleanDraft && s.booleanDraft.kind !== 'stl'
+        ? s.booleanDraft.position
+        : cutterStart(s.model.geometry, s.editFaces)
+    placeBooleanCutter({
+      op: activeOp,
+      kind,
+      size: nextSize,
+      position,
+      stl: null,
+    })
+  }
+
+  const apply = async () => {
+    const s = useStore.getState()
+    if (!s.model || !s.booleanDraft) return
     setBusy(true)
     setError(null)
     try {
-      const geom = s.model.geometry
-      geom.computeBoundingBox()
-      const center =
-        s.editFaces.size > 0
-          ? selectionCentroid(geom, s.editFaces)
-          : geom.boundingBox!.getCenter(new THREE.Vector3())
-      const cutter = stl
-        ? centerGeometryOn(stlBufferToGeometry(stl), center)
-        : primitiveGeometry(shape, center, size)
-      replaceEditedGeometry(await applyMeshBoolean(geom, cutter, op))
+      const cutter = draftCutterGeometry(s.booleanDraft)
+      const next = await applyMeshBoolean(
+        s.model.geometry,
+        cutter,
+        s.booleanDraft.op,
+      )
+      replaceEditedGeometry(next)
+      clearBooleanCutter()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Boolean failed')
     } finally {
@@ -227,11 +260,8 @@ function MeshBooleanSection() {
   return (
     <CollapsibleSection title="Mesh edit">
       <p className="empty-state">
-        Applied to the base mesh before insert cuts.
-        {editCount > 0
-          ? ' Cutter sits on the yellow face selection.'
-          : ' Cutter sits on the mesh center.'}{' '}
-        Face inserts are cleared. Pen outlines stay.
+        Add a gray cutter, drag its arrows, then Apply. The cut runs on the
+        base mesh before inserts. Face inserts are cleared. Pen outlines stay.
       </p>
       <div className="bpy-prop-row">
         <span className="bpy-prop-label">Op</span>
@@ -240,8 +270,11 @@ function MeshBooleanSection() {
             <button
               key={id}
               type="button"
-              className={op === id ? 'active' : ''}
-              onClick={() => setOp(id)}
+              className={activeOp === id ? 'active' : ''}
+              onClick={() => {
+                setOp(id)
+                if (draft) patchBooleanCutter({ op: id })
+              }}
             >
               {id === 'subtract' ? 'Subtract' : id === 'union' ? 'Union' : 'Intersect'}
             </button>
@@ -249,42 +282,53 @@ function MeshBooleanSection() {
         </div>
       </div>
       <div className="bpy-prop-row">
-        <span className="bpy-prop-label">Shape</span>
+        <span className="bpy-prop-label">Add</span>
         <div className="bpy-prop-buttons">
           <button
             type="button"
-            className={shape === 'box' ? 'active' : ''}
-            onClick={() => setShape('box')}
+            className={draft?.kind === 'box' ? 'active' : ''}
+            disabled={busy}
+            onClick={() => place('box', stlMode ? 10 : activeSize)}
           >
             Box
           </button>
           <button
             type="button"
-            className={shape === 'sphere' ? 'active' : ''}
-            onClick={() => setShape('sphere')}
+            className={draft?.kind === 'sphere' ? 'active' : ''}
+            disabled={busy}
+            onClick={() => place('sphere', stlMode ? 10 : activeSize)}
           >
             Sphere
+          </button>
+          <button type="button" disabled={busy} onClick={() => fileRef.current?.click()}>
+            STL…
           </button>
         </div>
       </div>
       <label className="bpy-prop-row bpy-prop-slider">
-        <span className="bpy-prop-label">Size</span>
+        <span className="bpy-prop-label">{stlMode ? 'Scale' : 'Size'}</span>
         <input
           type="range"
-          min={1}
-          max={80}
-          step={1}
-          value={size}
-          onChange={(e) => setSize(parseFloat(e.target.value))}
+          min={stlMode ? 0.25 : 1}
+          max={stlMode ? 4 : 80}
+          step={stlMode ? 0.05 : 1}
+          value={activeSize}
+          onChange={(e) => {
+            const n = parseFloat(e.target.value)
+            setSize(n)
+            if (draft) patchBooleanCutter({ size: n })
+          }}
         />
-        <span className="bpy-prop-value">{size.toFixed(0)}</span>
+        <span className="bpy-prop-value">
+          {stlMode ? activeSize.toFixed(2) : activeSize.toFixed(0)}
+        </span>
       </label>
       <div className="bpy-prop-buttons">
-        <button type="button" disabled={busy} onClick={() => void run()}>
+        <button type="button" disabled={busy || !draft} onClick={() => void apply()}>
           Apply
         </button>
-        <button type="button" disabled={busy} onClick={() => fileRef.current?.click()}>
-          STL…
+        <button type="button" disabled={!draft} onClick={clearBooleanCutter}>
+          Cancel
         </button>
       </div>
       <input
@@ -295,8 +339,20 @@ function MeshBooleanSection() {
         onChange={(e) => {
           const file = e.target.files?.[0]
           e.target.value = ''
-          if (!file) return
-          void file.arrayBuffer().then((buf) => run(buf))
+          if (!file || !model) return
+          void file.arrayBuffer().then((buf) => {
+            const s = useStore.getState()
+            if (!s.model) return
+            const stl = centerGeometryOn(stlBufferToGeometry(buf), new THREE.Vector3())
+            placeBooleanCutter({
+              op: activeOp,
+              kind: 'stl',
+              size: 1,
+              position: cutterStart(s.model.geometry, s.editFaces),
+              stl,
+            })
+            setSize(1)
+          })
         }}
       />
     </CollapsibleSection>
