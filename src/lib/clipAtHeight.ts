@@ -84,7 +84,7 @@ export function nextBoundaryNeighbor<T>(
   const c = xy(cur)
   const p = xy(prev)
   const back = Math.atan2(p.y - c.y, p.x - c.x)
-  let best = open[0]!
+  let best: T = open[0]!
   let bestDelta = Infinity
   for (const cand of open) {
     const q = xy(cand)

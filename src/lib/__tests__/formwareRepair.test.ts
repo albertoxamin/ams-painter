@@ -8,6 +8,12 @@ import {
   repairStlWithFormware,
 } from '../formwareRepair'
 
+function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new ArrayBuffer(bytes.byteLength)
+  new Uint8Array(copy).set(bytes)
+  return copy
+}
+
 function binaryStl(triCount = 1): Uint8Array {
   const buf = new ArrayBuffer(84 + triCount * 50)
   const view = new DataView(buf)
@@ -66,7 +72,7 @@ describe('formwareRepair', () => {
   it('round-trips a raw STL buffer through the parser', () => {
     const box = new THREE.BoxGeometry(2, 2, 2)
     const bytes = geometryToRawStlBytes(box)
-    const geom = parseStlGeometry(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength))
+    const geom = parseStlGeometry(asArrayBuffer(bytes))
     expect(geom.getAttribute('position').count).toBeGreaterThan(0)
   })
 
@@ -135,7 +141,7 @@ describe('formwareRepair', () => {
           )
         }
         if (url.toLowerCase().includes('downloadstl')) {
-          return new Response(repaired, { status: 200 })
+          return new Response(asArrayBuffer(repaired), { status: 200 })
         }
         throw new Error(`unexpected fetch ${url}`)
       }),
